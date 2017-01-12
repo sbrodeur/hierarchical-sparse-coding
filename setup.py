@@ -12,7 +12,7 @@ setup(
     license = "BSD 3-Clause License",
     keywords = "signal processing, unsupervised learning, artificial intelligence, information compression",
     url = "https://github.com/sbrodeur/hierarchical-sparse-coding",
-    packages=['hsc', 'tests'],
+    packages=['hsc'],
     setup_requires=['setuptools-markdown'],
     install_requires=[
         "setuptools-markdown",
