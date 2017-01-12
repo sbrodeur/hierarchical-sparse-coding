@@ -17,7 +17,7 @@ fi
 
 # Run unit tests and coverage analysis for the 'action' module
 nosetests --verbosity 3 --with-coverage --cover-html --cover-html-dir=${DIR}/report/coverage \
---cover-erase --cover-tests --cover-package=hsc,hsc.dataset
+--cover-erase --cover-tests --cover-package=hsc,hsc.dataset,hsc.analysis
 if type "x-www-browser" > /dev/null; then
 	x-www-browser ${DIR}/report/coverage/index.html
 fi
