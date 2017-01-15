@@ -30,18 +30,22 @@
 import collections
 import numpy as np
 
-def calculateBitForLevels(multilevelDict, dtype=np.float32):
-    
-    # Find the number of bit to describe a pattern at each scale (depends on the counts)
-    pidx_bits = np.ceil(np.log(multilevelDict.counts)/np.log(2))
-    sidx_bits = np.ceil(np.log(len(multilevelDict.scales))/np.log(2))
-    
+def calculateBitForDatatype(dtype):
     if np.issubdtype(dtype, np.float):
         c_bits = 1 + np.finfo(dtype).iexp + np.finfo(dtype).nmant # sign + exponent + fraction bits
     elif np.issubdtype(dtype, np.int):
         c_bits = np.iinfo(dtype).bits # integer bits (signed or unsigned)
     else:
         raise Exception('Unsupported datatype: %s' % (str(dtype)))
+    return c_bits
+
+def calculateBitForLevels(multilevelDict, dtype=np.float32):
+    
+    # Find the number of bit to describe a pattern at each scale (depends on the counts)
+    pidx_bits = np.ceil(np.log(multilevelDict.counts)/np.log(2))
+    sidx_bits = np.ceil(np.log(len(multilevelDict.scales))/np.log(2))
+    
+    c_bits = calculateBitForDatatype(dtype)
         
     bits = sidx_bits + pidx_bits + c_bits
     

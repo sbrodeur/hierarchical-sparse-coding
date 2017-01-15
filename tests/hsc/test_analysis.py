@@ -32,10 +32,20 @@ import unittest
 import numpy as np
 
 from hsc.dataset import MultilevelDictionary
-from hsc.analysis import calculateBitForLevels, calculateInformationRate, calculateMultilevelInformationRates
+from hsc.analysis import calculateBitForLevels, calculateInformationRate, calculateMultilevelInformationRates, calculateBitForDatatype
 
 class TestFunctions(unittest.TestCase):
 
+    def test_calculateBitForDatatype(self):
+        c_bits = calculateBitForDatatype(dtype=np.float32)
+        self.assertTrue(c_bits == 32)
+        c_bits = calculateBitForDatatype(dtype=np.float64)
+        self.assertTrue(c_bits == 64)
+        c_bits = calculateBitForDatatype(dtype=np.int32)
+        self.assertTrue(c_bits == 32)
+        c_bits = calculateBitForDatatype(dtype=np.int16)
+        self.assertTrue(c_bits == 16)
+        
     def test_calculateBitForLevels(self):
         multilevelDict = MultilevelDictionary(scales=[32,64], counts=[8, 16])
         bits = calculateBitForLevels(multilevelDict, dtype=np.float32)

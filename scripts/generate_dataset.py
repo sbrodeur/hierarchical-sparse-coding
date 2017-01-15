@@ -34,6 +34,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 from hsc.dataset import MultilevelDictionary, SignalGenerator
+from hsc.analysis import calculateMultilevelInformationRates, calculateBitForDatatype
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def generateScales(mode='linear'):
     if mode == 'linear':
         scales = np.arange(1, 15, 2).astype(np.int)
     elif mode == 'exponential':
-        scales = 2**np.arange(0, 7, dtype=np.int)
+        scales = 2**np.arange(5, 10, dtype=np.int)
     elif mode == 'prime':
         scales = np.array([1, 2, 3, 5, 7, 11, 13, 17], dtype=np.int)
     else:
@@ -49,9 +50,10 @@ def generateScales(mode='linear'):
     return scales
 
 def generateCountDistribution(scales, mode='constant'):
+    scales = np.array(scales)
     if mode == 'linear':
         # Linear scaling of pattern counts
-        counts = np.array(4 * scales, dtype=np.int)
+        counts = np.linspace(16, 256, len(scales), dtype=np.int)
     elif mode == 'constant':
         counts = 2 * np.ones_like(scales).astype(dtype=np.int)
     elif mode == 'exponential':
@@ -62,10 +64,11 @@ def generateCountDistribution(scales, mode='constant'):
 
 def generateRateDistribution(scales, mode='constant'):
     
+    scales = np.array(scales)
     if mode == 'constant':
-        r = 0.1 * np.ones_like(scales)
+        r = 0.00002 * np.ones_like(scales)
     elif mode == 'linear':
-        r = 0.01 * scales / np.max(scales)
+        r = 0.00005 * scales / np.max(scales)
     elif mode == 'gaussian':
         # Normal distribution for pattern rates across scales.
         # Set mean as the median scale, and standard deviation as 
@@ -91,8 +94,15 @@ if __name__ == "__main__":
     cdir = os.path.dirname(os.path.realpath(__file__))
     
     # Generate multi-level dictionary
-    multilevelDict = MultilevelDictionary(scales=[32, 64, 128, 256], counts=[8,16,32,64],
-                                          decompositionSize=4, maxNbPatternsConsecutiveRejected=100)
+    logger.info('Generating new multi-level dictionary...')
+    scales = generateScales(mode='exponential')
+    counts = generateCountDistribution(scales, mode='linear')
+    decompositionSizes = np.linspace(4, 8, len(scales), dtype=np.int)
+    logger.info('Scales defined for levels: %s' % (str(scales)))
+    logger.info('Counts defined for levels: %s' % (str(counts)))
+    logger.info('Decomposition sizes defined for levels: %s' % (str(decompositionSizes)))
+    multilevelDict = MultilevelDictionary(scales, counts,
+                                          decompositionSizes, maxNbPatternsConsecutiveRejected=100)
     # Visualize dictionary and save to disk as images
     figs = multilevelDict.visualize(maxCounts=9)
     for l,fig in enumerate(figs):
@@ -102,15 +112,39 @@ if __name__ == "__main__":
     filePath = os.path.join(cdir, 'multilevel-dict.pkl')
     multilevelDict.save(filePath)
     
+    # Find the optimal rates to achieve about 50% of the raw bitrate when reducing to the first level
+    logger.info('Estimating optimal rates...')
+    minimumCompressionRatio = 0.50
+    dtype = np.float32
+    rates = generateRateDistribution(multilevelDict.scales, mode='constant')
+    c_bits = calculateBitForDatatype(dtype)
+    factors = np.linspace(1e-6, 1.0, num=1000)[::-1]
+    factorIdx = 0
+    while True:
+        scaledRates = np.copy(rates) * factors[factorIdx]
+        avgInfoRates = calculateMultilevelInformationRates(multilevelDict, scaledRates, dtype=dtype)
+        if avgInfoRates[0] <= c_bits * minimumCompressionRatio:
+            # Valid rates found
+            break
+        else:
+            factorIdx += 1
+            if factorIdx >= len(factors):
+                raise Exception("Unable to find the optimal rates: initial rates are too high")
+            logger.debug('Rates are too high (bitrate of %f bit/sample at first level): scaling so that maximum rate across levels is %f' % (avgInfoRates[0], np.max(rates)))
+    rates = scaledRates
+    logger.info('Optimal rate scale found: %f (for bitrate of %f bit/sample at first level)' % (np.max(rates), avgInfoRates[0]))
+    
     # Generate events and signal using the multi-level dictionary
+    logger.info('Generating events and raw temporal signal...')
     nbSamples = int(1e7)
-    rates = [0.00005, 0.0001, 0.0002, 0.0002]
     generator = SignalGenerator(multilevelDict, rates)
     events = generator.generateEvents(nbSamples=nbSamples)
     signal = generator.generateSignalFromEvents(events, nbSamples=nbSamples)
+    logger.info('Number of generated events: %d' % (len(events)))
     
     # Visualize the beginning of the signal and save image to disk
-    shortSignal = signal[:10000]
+    logger.info('Generating figures for visualization...')
+    shortSignal = signal[:min(100000, len(signal))]
     fig = plt.figure(figsize=(8,4), facecolor='white', frameon=True)
     fig.canvas.set_window_title('Generated signal')
     fig.subplots_adjust(left=0.1, right=0.95, bottom=0.15, top=0.95,
@@ -129,4 +163,6 @@ if __name__ == "__main__":
     np.savez_compressed('dataset.npz', signal=signal, events=events, rates=rates)
     
     plt.show()
+    
+    logger.info('All done.')
     
