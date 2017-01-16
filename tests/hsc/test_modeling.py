@@ -35,7 +35,7 @@ import scipy.sparse
 import numpy as np
 
 from hsc.modeling import ConvolutionalMatchingPursuit, ConvolutionalSparseCoder, ConvolutionalDictionaryLearner, extractRandomWindows, convolve1d, convolve1d_batch, extractWindows
-from hsc.utils import normalize
+from hsc.utils import normalize, overlapAdd
 
 class TestConvolutionalDictionaryLearner(unittest.TestCase):
 
@@ -157,6 +157,29 @@ class TestConvolutionalSparseCoder(unittest.TestCase):
             self.assertTrue(scipy.sparse.issparse(coefficients))
             self.assertTrue(coefficients.nnz > 0)
             self.assertTrue(snr >= tolerance)
+    
+    def test_optimality(self):
+        cmp = ConvolutionalMatchingPursuit()
+        nbComponents = 4
+        filterWidth = 32
+        D = normalize(np.random.random(size=(nbComponents, filterWidth)), axis=1)
+        csc = ConvolutionalSparseCoder(D, approximator=cmp)
+        
+        sequence = np.zeros((256,), dtype=np.float32)
+        overlapAdd(sequence, D[0], t=32, copy=False)
+        overlapAdd(sequence, D[3], t=48, copy=False)
+        overlapAdd(sequence, 0.5*D[1], t=64, copy=False)
+        overlapAdd(sequence, D[0], t=96, copy=False)
+        overlapAdd(sequence, 0.75*D[2], t=128, copy=False)
+        overlapAdd(sequence, 2.0*D[2], t=192, copy=False)
+        
+        coefficients, residual = csc.encode(sequence, nbNonzeroCoefs=8, minCoefficients=1e-6)
+        c = coefficients.tocoo()
+        self.assertTrue(coefficients.nnz == 6)
+        self.assertTrue(np.array_equal(c.row, [32,48,64,96,128,192]))
+        self.assertTrue(np.array_equal(c.col, [0,3,1,0,2,2]))
+        self.assertTrue(np.allclose(c.data, [1.0,1.0,0.5,1.0,0.75,2.0]))
+        self.assertTrue(np.allclose(residual, np.zeros_like(residual), atol=1e-6))
             
     def test_reconstruct(self):
 

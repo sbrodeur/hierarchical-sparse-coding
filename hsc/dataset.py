@@ -405,6 +405,7 @@ class SignalGenerator(object):
                 
                 levels = level * np.ones_like(times, dtype=np.int)
                 indices = i * np.ones_like(times, dtype=np.int)
+                coefficients = coefficients.astype(np.float32)
                 events.extend([event for event in zip(times, levels, indices, coefficients)])
                 
         # Sort events by time (increasing)
@@ -428,7 +429,7 @@ class SignalGenerator(object):
             logger.info('Number of samples estimated from the events: %d' % (nbSamples))
         
         # Compose discrete signal
-        signal = np.zeros(nbSamples)
+        signal = np.zeros(nbSamples, dtype=np.float32)
         for t, l, i, c in events:
             # Additive overlap to the signal, taking into account boundaries
             overlapAdd(signal, element=c*self.multilevelDict.dicts[l][i,:], t=t, copy=False)

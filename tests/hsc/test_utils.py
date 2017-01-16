@@ -31,9 +31,18 @@ import os
 import unittest
 import numpy as np
 
-from hsc.utils import findGridSize, normalize, overlapAdd, overlapReplace
+from hsc.utils import findGridSize, normalize, overlapAdd, overlapReplace, profileFunction
 
 class TestFunctions(unittest.TestCase):
+
+    def test_profileFunction(self):
+        
+        def func():
+            x = np.random.random(size=int(1e5))
+            y = np.argmax(x)
+            
+        str = profileFunction(func)
+        self.assertTrue(len(str) > 0)
 
     def test_findGridSize(self):
         m,n = findGridSize(16)

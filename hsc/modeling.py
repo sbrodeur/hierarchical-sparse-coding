@@ -360,7 +360,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         
         return t, fIdx
         
-    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5):
+    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None):
 
         # Initialize the residual and sparse coefficients
         energySignal = np.sum(np.square(sequence))
@@ -381,6 +381,8 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
 
             # Adaptive selection: rejection if coefficients are less that alpha times the maximum.
             nullCoeffThres = alpha * np.max(np.abs(innerProducts))
+            if minCoefficients is not None:
+                nullCoeffThres = min(minCoefficients, nullCoeffThres)
             tIndices, fIndices = self._doSelection(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=nullCoeffThres)
             for t, fIdx in zip(tIndices, fIndices):
         
@@ -463,6 +465,15 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             logger.info('Number of selection: %d' % (len(tIndices)))
             logger.info('Number of non-zero coefficients: %d' % (nnz))
             logger.info('Number of duplicate coefficients: %d' % (nbDuplicates))
+
+
+        if minCoefficients is not None:
+            # Clip small coefficients to zero
+            clippedCoefficients = scipy.sparse.lil_matrix((sequence.shape[0], D.shape[0]))
+            cx = coefficients.tocoo()
+            nullMask = np.where(np.abs(cx.data) >= minCoefficients)
+            clippedCoefficients[cx.row[nullMask],  cx.col[nullMask]] = cx.data[nullMask]
+            coefficients = clippedCoefficients
 
         return coefficients, residual
 
