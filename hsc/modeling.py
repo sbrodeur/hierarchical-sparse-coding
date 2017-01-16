@@ -189,9 +189,9 @@ class ConvolutionalDictionaryLearner(object):
     def _init_D(self, data, initMethod='random_samples'):
  
         if initMethod == 'noise':
-            D = np.random.uniform(low=np.min(data), high=np.max(data), size=(self.k, self.windowSize))
+            D = normalize(np.random.uniform(low=np.min(data), high=np.max(data), size=(self.k, self.windowSize)), axis=1)
         elif initMethod == 'random_samples':
-            D = extractRandomWindows(data, self.k, self.windowSize)
+            D = normalize(extractRandomWindows(data, self.k, self.windowSize), axis=1)
         else:
             raise Exception('Unsupported initialization method: %s' % (initMethod))
         return D
@@ -267,6 +267,7 @@ class ConvolutionalDictionaryLearner(object):
             # Compute distance change
             alpha = np.sqrt(np.sum(np.square(D - newD)))
             
+            logger.debug('K-mean iteration %d: tolerance = %f' % (n, alpha))
             D = newD
             n += 1
  
@@ -284,91 +285,195 @@ class ConvolutionalDictionaryLearner(object):
 
 class SparseApproximator(object):
 
-    def computeCoefficients(self, X, D, dense=False):
+    def computeCoefficients(self, X, D):
         raise NotImplementedError()
 
 class ConvolutionalMatchingPursuit(SparseApproximator):
 
-    def __init__(self, nbNonzeroCoefs=None, tolerance=0.0):
-        self.__dict__.update(nbNonzeroCoefs=nbNonzeroCoefs, tolerance=tolerance)
+    def __init__(self):
+        pass
 
-    def computeCoefficients(self, sequence, D):
+    def _doSelection(self, innerProducts, filterWidth, nbBlocks=1, offset=False, nullCoeffThres=0.0):
+        
+        if nbBlocks is None or nbBlocks > 1:
+            # Calculate the number of blocks
+            if nbBlocks is None:
+                # If the number of blocks was not provided, set it automatically so that block sizes are of 4 times the length of the filters
+                blockSize = 4 * filterWidth
+            else:
+                blockSize = int(np.floor(innerProducts.shape[0] / float(nbBlocks)))
+            # Make sure block size is even
+            if np.mod(blockSize, 2) == 1:
+                blockSize += 1
+            nbBlocks = int(np.ceil(innerProducts.shape[0] / float(blockSize)))
+            
+            # Calculate padding needed for even-sized blocks
+            basePadEnd = nbBlocks*blockSize - innerProducts.shape[0]
+            if offset:
+                # With offset
+                padding = (blockSize/2, basePadEnd + blockSize/2)
+                nbBlocks += 1
+            else:
+                # No offset
+                padding = (0, basePadEnd)
+            
+            # Pad array
+            innerProducts = np.pad(innerProducts, [padding,] + [(0,0) for _ in range(innerProducts.ndim-1)], mode='constant')
+            windows = np.stack(np.split(innerProducts, nbBlocks, axis=0))
+            
+            # Get maximum activation inside each block
+            tRel, fIdx = np.unravel_index(np.argmax(np.abs(windows.reshape((windows.shape[0], windows.shape[1]*windows.shape[2]))), axis=1),
+                                       dims=(windows.shape[1], windows.shape[2]))
+            t = tRel + np.arange(0, nbBlocks*blockSize, step=blockSize, dtype=np.int)
+            
+            # Remove activations that would cause interference (too close across block boundaries), always keep the first activation
+            tDiff = t[1:] - t[:-1]
+            indices = np.where(tDiff >= filterWidth)[0]
+            indices = np.concatenate(([0], indices + 1))
+            nbInterferences = len(t) - len(indices)
+            t = t[indices]
+            fIdx = fIdx[indices]
+            logger.debug('Number of interfering activations removed during selection: %d' % (nbInterferences))
+                
+            # Remove activations that have null coefficients (e.g. because of padding)
+            coefficients = innerProducts[t, fIdx]
+            nullMask = np.where(np.abs(coefficients) > nullCoeffThres)
+            t, fIdx, coefficients = t[nullMask], fIdx[nullMask], coefficients[nullMask]
+            
+            # Sort activations by absolute amplitude of coefficients
+            indices = np.argsort(np.abs(coefficients))[::-1]
+            nbNulls = len(t) - len(indices)
+            t, fIdx = t[indices], fIdx[indices]
+            if offset:
+                # Remove offset constant
+                t -= blockSize/2
+            logger.debug('Number of null activations removed during selection: %d' % (nbNulls))
+        
+        else:
+            # Find maximum across the whole activations
+            t, fIdx = np.unravel_index(np.argmax(np.abs(innerProducts)), innerProducts.shape)
+            t = np.stack((t,))
+            fIdx = np.stack((fIdx,))
+        
+        assert np.all(t >= 0) and np.all(t < innerProducts.shape[0])
+        assert np.all(fIdx >= 0) and np.all(fIdx < innerProducts.shape[1])
+        
+        return t, fIdx
+        
+    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5):
 
         # Initialize the residual and sparse coefficients
+        energySignal = np.sum(np.square(sequence))
         residual = np.copy(sequence)
         coefficients = scipy.sparse.lil_matrix((sequence.shape[0], D.shape[0]))
         
         # Convolve the input signal once, then locally recompute the affected projections when the residual is changed. 
         innerProducts = convolve1d(residual, D, padding='same')
         
-        tolerance = self.tolerance + 1.0
-        n = 0
+        # Loop until convergence or if any stopping criteria is met
+        nbIterations = 0
+        nnz = 0
         nbDuplicates = 0
-        while tolerance > self.tolerance:
+        offset = False
+        converged = False
+        nbSelections = 0
+        while not converged:
 
-            # Find the maximum activation over the whole sequence and filters
-            t, fIdx = np.unravel_index(np.argmax(np.abs(innerProducts)), innerProducts.shape)
-            coefficient = innerProducts[t, fIdx]
+            # Adaptive selection: rejection if coefficients are less that alpha times the maximum.
+            nullCoeffThres = alpha * np.max(np.abs(innerProducts))
+            tIndices, fIndices = self._doSelection(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=nullCoeffThres)
+            for t, fIdx in zip(tIndices, fIndices):
+        
+                # Find the maximum activation over the whole sequence and filters
+                coefficient = innerProducts[t, fIdx]
+    
+                # Update the sparse coefficients
+                if np.abs(coefficients[t, fIdx]) > 0.0:
+                    nbDuplicates += 1
+                else:
+                    nnz += 1
+                coefficients[t, fIdx] += coefficient
+    
+                # Update the residual by removing the contribution of the selected filter
+                # NOTE: negate the coefficient to actually perform a overlap-remove operation.
+                overlapAdd(residual, -coefficient*D[fIdx], t, copy=False)
+                
+                # Update the inner products
+                # First, calculate the span of the residual that needs to be convolved again, 
+                # and the padding required if at the beginning or end of the residual
+                width = D.shape[1]
+                padStart = 0
+                if np.mod(width, 2) == 0:
+                    # Even width
+                    tstart = t-width/2+1-(width-1)
+                else:
+                    # Odd width
+                    tstart = t-width/2-(width-1)
+                startIdx = max(0,tstart)
+                if tstart < 0:
+                    padStart = -tstart
+                        
+                tend = t+width/2+(width-1)
+                endIdx = min(residual.shape[0]-1, tend)
+                padEnd = 0
+                if tend > residual.shape[0]-1:
+                    padEnd = tend - (residual.shape[0]-1)
+                assert endIdx - startIdx >= 0
+                assert padStart >= 0 and padEnd >= 0
+                 
+                paddedResidual = np.pad(residual[startIdx:endIdx+1], [(padStart, padEnd)] + [(0,0) for _ in range(residual.ndim-1)], mode='reflect')
+                localInnerProducts = convolve1d(paddedResidual, D, padding='valid')
+                assert localInnerProducts.shape[0] == width + (width-1)
+                overlapReplace(innerProducts, localInnerProducts, t, copy=False)
+                
+                # Print information about current iteration
+                residualScale = np.max(np.abs(residual))
+                energyResidual = np.sum(np.square(residual))
+                snr = 10.0*np.log10(energySignal/energyResidual)
+                logger.debug('Matching pursuit iteration %d: event is (t = %d, f = %d, c = %f), snr = %f dB, residual scale = %f' % (nbIterations, t, fIdx, coefficient, snr, residualScale))
+                nbIterations += 1
+                
+                # Check stopping criteria
+                if nbNonzeroCoefs is not None and nnz >= nbNonzeroCoefs:
+                    logger.debug('Tolerance for number of non-zero coefficients reached')
+                    converged = True
+                    break
+                if toleranceResidualScale is not None and residualScale <= toleranceResidualScale:
+                    logger.debug('Tolerance for residual scale (absolute value) reached')
+                    converged = True
+                    break
+                if toleranceSnr is not None and snr >= toleranceSnr:
+                    logger.debug('Tolerance for signal-to-noise ratio reached')
+                    converged = True
+                    break
 
-            # Update the sparse coefficients
-            if np.abs(coefficients[t, fIdx]) > 0.0:
-                nbDuplicates += 1
-            coefficients[t, fIdx] += coefficient
+            if len(tIndices) == 0:
+                # This means all coefficients are null
+                logger.warn('Selection returned empty set: considering convergence is achieved')
+                converged = True
+            nbSelections += 1
 
-            # Update the residual by removing the contribution of the selected filter
-            # NOTE: negate the coefficient to actually perform a overlap-remove operation.
-            overlapAdd(residual, -coefficient*D[fIdx], t, copy=False)
-            
-            # Update the inner products
-            # First, calculate the span of the residual that needs to be convolved again, 
-            # and the padding required if at the beginning or end of the residual
-            width = D.shape[1]
-            padStart = 0
-            if np.mod(width, 2) == 0:
-                # Even width
-                tstart = t-width/2+1-(width-1)
-            else:
-                # Odd width
-                tstart = t-width/2-(width-1)
-            startIdx = max(0,tstart)
-            if tstart < 0:
-                padStart = -tstart
-                    
-            tend = t+width/2+(width-1)
-            endIdx = min(residual.shape[0]-1, tend)
-            padEnd = 0
-            if tend > residual.shape[0]-1:
-                padEnd = tend - (residual.shape[0]-1)
-            assert endIdx - startIdx >= 0
-            assert padStart >= 0 and padEnd >= 0
-             
-            paddedResidual = np.pad(residual[startIdx:endIdx+1], [(padStart, padEnd)] + [(0,0) for _ in range(residual.ndim-1)], mode='reflect')
-            localInnerProducts = convolve1d(paddedResidual, D, padding='valid')
-            assert localInnerProducts.shape[0] == width + (width-1)
-            overlapReplace(innerProducts, localInnerProducts, t, copy=False)
-            
-            tolerance = np.max(np.abs(residual))
-            n += 1
-            
-            if self.nbNonzeroCoefs is not None and coefficients.nnz >= self.nbNonzeroCoefs:
-                break
+            # Toggle offset switch
+            offset = not offset
 
-        logger.debug('Tolerance of %f achieved after %d iterations' % (tolerance, n))
-        logger.debug('Number of duplicate coefficients: %d' % (nbDuplicates))
+            # Print information
+            energyResidual = np.sum(np.square(residual))
+            snr = 10.0*np.log10(energySignal/energyResidual)
+            logger.info('SNR of %f dB achieved after %d selection iterations' % (snr, nbSelections))
+            logger.info('Number of selection: %d' % (len(tIndices)))
+            logger.info('Number of non-zero coefficients: %d' % (nnz))
+            logger.info('Number of duplicate coefficients: %d' % (nbDuplicates))
 
         return coefficients, residual
 
 class ConvolutionalSparseCoder(object):
  
-    def __init__(self, nbComponents, filterWidth, nbFeatures, approximator):
- 
-        # Initialize dictionary randomly, with all components having unit norms
-        self.D = normalize(np.random.random(size=(nbComponents, filterWidth, nbFeatures)), axis=(1,2))
-        
+    def __init__(self, D, approximator):
+        self.D = D
         self.approximator = approximator
  
-    def encode(self, X):
-        return self.approximator.computeCoefficients(X, self.D)
+    def encode(self, X, *args, **kwargs):
+        return self.approximator.computeCoefficients(X, self.D, *args, **kwargs)
  
     def reconstruct(self, coefficients):
         assert scipy.sparse.issparse(coefficients)

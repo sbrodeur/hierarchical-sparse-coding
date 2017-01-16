@@ -71,6 +71,14 @@ class TestFunctions(unittest.TestCase):
         self.assertTrue(xn.shape == x.shape)
         for i in range(x.shape[0]):
             self.assertTrue(np.allclose(np.sqrt(np.sum(np.square(xn[i]))), 1.0))
+            
+        x = np.random.random(size=(10,16,4))
+        x[0,:,:] = 0.0
+        xn = normalize(x, axis=(1,2))
+        self.assertTrue(xn.shape == x.shape)
+        self.assertTrue(np.allclose(np.sqrt(np.sum(np.square(xn[0]))), 0.0))
+        for i in range(1, x.shape[0]):
+            self.assertTrue(np.allclose(np.sqrt(np.sum(np.square(xn[i]))), 1.0))
 
     def test_overlapAdd(self):
         sequence = np.zeros(8)

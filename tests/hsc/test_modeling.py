@@ -63,45 +63,115 @@ class TestConvolutionalMatchingPursuit(unittest.TestCase):
 
     def test_computeCoefficients(self):
         
+        nbNonzeroCoefs = 4
         for dsize in [1,2,3]:
             for dwidth in [3,5,6]:
-                cmp = ConvolutionalMatchingPursuit(nbNonzeroCoefs=4, tolerance=0.0)
+                cmp = ConvolutionalMatchingPursuit()
                 sequence = np.random.random(size=(16,))
                 D = normalize(np.random.random(size=(dsize,dwidth)), axis=1)
-                coefficients, residual = cmp.computeCoefficients(sequence, D)
-                self.assertTrue(coefficients.nnz == cmp.nbNonzeroCoefs)
+                coefficients, residual = cmp.computeCoefficients(sequence, D, nbNonzeroCoefs=nbNonzeroCoefs)
+                self.assertTrue(coefficients.nnz == nbNonzeroCoefs)
                 self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
         
-        cmp = ConvolutionalMatchingPursuit(nbNonzeroCoefs=16, tolerance=0.0)
+        nbNonzeroCoefs = 16
+        cmp = ConvolutionalMatchingPursuit()
         sequence = np.random.random(size=(64,2))
         D = normalize(np.random.random(size=(16,15,2)), axis=(1,2))
-        coefficients, residual = cmp.computeCoefficients(sequence, D)
-        self.assertTrue(coefficients.nnz == cmp.nbNonzeroCoefs)
+        coefficients, residual = cmp.computeCoefficients(sequence, D, nbNonzeroCoefs=nbNonzeroCoefs)
+        self.assertTrue(coefficients.nnz == nbNonzeroCoefs)
         self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
 
+    def test_doSelection(self):
+        
+        filterWidth = 5
+        nbBlocks = 4
+        cmp = ConvolutionalMatchingPursuit()
+        innerProducts = np.arange(256).reshape((64,4)).astype(np.float)
+        innerProducts[-1] = innerProducts[-1][::-1]
+        t, fIdx = cmp._doSelection(innerProducts, filterWidth, nbBlocks, offset=False)
+        self.assertTrue(len(t) == nbBlocks)
+        self.assertTrue(len(fIdx) == nbBlocks)
+        self.assertTrue(np.array_equal(t,[63,47,31,15]))
+        self.assertTrue(np.array_equal(fIdx,[0,3,3,3]))
+        self.assertTrue(np.allclose(np.abs(innerProducts[t[0], fIdx[0]]), np.abs(np.max(innerProducts))))
+        t, fIdx = cmp._doSelection(innerProducts, filterWidth, nbBlocks, offset=True)
+        self.assertTrue(len(t) == nbBlocks+1)
+        self.assertTrue(len(fIdx) == nbBlocks+1)
+        self.assertTrue(np.array_equal(t,[63,55,39,23,7]))
+        self.assertTrue(np.array_equal(fIdx,[0,3,3,3,3]))
+        self.assertTrue(np.allclose(np.abs(innerProducts[t[0], fIdx[0]]), np.abs(np.max(innerProducts))))
+        
+        filterWidth = 3
+        nbBlocks = None
+        cmp = ConvolutionalMatchingPursuit()
+        innerProducts = np.arange(256).reshape((64,4)).astype(np.float)
+        innerProducts[-1] = innerProducts[-1][::-1]
+        t, fIdx = cmp._doSelection(innerProducts, filterWidth, nbBlocks, offset=False)
+        self.assertTrue(len(t) == 6)
+        self.assertTrue(len(fIdx) == 6)
+        self.assertTrue(np.array_equal(t,[63,59,47,35,23,11]))
+        self.assertTrue(np.array_equal(fIdx,[0,3,3,3,3,3]))
+        self.assertTrue(np.allclose(np.abs(innerProducts[t[0], fIdx[0]]), np.abs(np.max(innerProducts))))
+        
+        filterWidth = 5
+        nbBlocks = 5
+        cmp = ConvolutionalMatchingPursuit()
+        innerProducts = np.arange(256).reshape((64,4)).astype(np.float)
+        innerProducts[-1] = innerProducts[-1][::-1]
+        t, fIdx = cmp._doSelection(innerProducts, filterWidth, nbBlocks, offset=False)
+        self.assertTrue(len(t) == nbBlocks)
+        self.assertTrue(len(fIdx) == nbBlocks)
+        self.assertTrue(np.array_equal(t,[59,47,35,23,11])) # Missing 63 because of interference
+        self.assertTrue(np.array_equal(fIdx,[3,3,3,3,3]))
+        self.assertTrue(not np.allclose(np.abs(innerProducts[t[0], fIdx[0]]), np.abs(np.max(innerProducts))))
+        
 class TestConvolutionalSparseCoder(unittest.TestCase):
 
     def test_encode(self):
         
         for tolerance in [0.5, 0.1, 0.001, 0.000001]:
-            cmp = ConvolutionalMatchingPursuit(nbNonzeroCoefs=None, tolerance=tolerance)
-            csc = ConvolutionalSparseCoder(nbComponents=32, filterWidth=9, nbFeatures=1, approximator=cmp)
+            cmp = ConvolutionalMatchingPursuit()
+            nbComponents = 32
+            filterWidth = 9
+            nbFeatures = 1
+            D = normalize(np.random.random(size=(nbComponents, filterWidth, nbFeatures)), axis=(1,2))
+            csc = ConvolutionalSparseCoder(D, approximator=cmp)
             
             sequence = np.random.random(size=(128,1))
-            coefficients, residual = csc.encode(sequence)
+            coefficients, residual = csc.encode(sequence, nbNonzeroCoefs=None, toleranceResidualScale=tolerance)
             self.assertTrue(scipy.sparse.issparse(coefficients))
             self.assertTrue(coefficients.nnz > 0)
             self.assertTrue(np.max(np.abs(residual)) < tolerance)
+            
+        for tolerance in [5, 10, 20, 50]:
+            cmp = ConvolutionalMatchingPursuit()
+            nbComponents = 32
+            filterWidth = 9
+            nbFeatures = 1
+            D = normalize(np.random.random(size=(nbComponents, filterWidth, nbFeatures)), axis=(1,2))
+            csc = ConvolutionalSparseCoder(D, approximator=cmp)
+            
+            sequence = np.random.random(size=(128,1))
+            coefficients, residual = csc.encode(sequence, nbNonzeroCoefs=None, toleranceSnr=tolerance)
+            snr = 10.0*np.log10(np.sum(np.square(sequence))/np.sum(np.square(residual)))
+            self.assertTrue(scipy.sparse.issparse(coefficients))
+            self.assertTrue(coefficients.nnz > 0)
+            self.assertTrue(snr >= tolerance)
             
     def test_reconstruct(self):
 
         for tolerance in [0.5, 0.1, 0.001, 0.000001]:
         
-            cmp = ConvolutionalMatchingPursuit(nbNonzeroCoefs=None, tolerance=tolerance)
-            csc = ConvolutionalSparseCoder(nbComponents=32, filterWidth=9, nbFeatures=1, approximator=cmp)
+            cmp = ConvolutionalMatchingPursuit()
+            
+            nbComponents = 32
+            filterWidth = 9
+            nbFeatures = 1
+            D = normalize(np.random.random(size=(nbComponents, filterWidth, nbFeatures)), axis=(1,2))
+            csc = ConvolutionalSparseCoder(D, approximator=cmp)
             
             sequence = np.random.random(size=(256,1))
-            coefficients, residual = csc.encode(sequence)
+            coefficients, residual = csc.encode(sequence, nbNonzeroCoefs=None, toleranceResidualScale=tolerance)
                 
             sequenceRecons = csc.reconstruct(coefficients)
             residualRecons = sequence - sequenceRecons
@@ -245,6 +315,4 @@ class TestFunctions(unittest.TestCase):
                             self.assertTrue(np.allclose(c[b,i+filterWidth/2,i], np.sum(np.square(filters[i]))))
                 
 if __name__ == '__main__':
-    #np.random.seed(42)
-    #logging.basicConfig(level=logging.DEBUG)
     unittest.main()

@@ -45,7 +45,10 @@ def findGridSize(l):
     return m,n
 
 def normalize(X, axis=None):
-    return X / np.sqrt(np.sum(np.square(X), axis=axis, keepdims=True))
+    l2norms = np.sqrt(np.sum(np.square(X), axis=axis, keepdims=True))
+    # Avoid division by zero
+    l2norms = np.where(l2norms > 0.0, l2norms, np.ones_like(l2norms))
+    return X / l2norms
 
 def overlapAdd(signal, element, t, copy=False):
     
