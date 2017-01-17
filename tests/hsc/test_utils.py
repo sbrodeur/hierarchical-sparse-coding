@@ -60,27 +60,47 @@ class TestFunctions(unittest.TestCase):
         m,n = findGridSize(1)
         self.assertTrue(m == 1 and n == 1)
 
-    def test_normalize(self):
+    def test_normalize_1d(self):
+        # 1D vector
         x = np.random.random(size=10)
-        xn = normalize(x)
+        xn = normalize(x, axis=None)
         self.assertTrue(xn.shape == x.shape)
         self.assertTrue(np.allclose(np.sqrt(np.sum(np.square(xn))), 1.0))
         xn = normalize(x, axis=0)
         self.assertTrue(xn.shape == x.shape)
         self.assertTrue(np.allclose(np.sqrt(np.sum(np.square(xn))), 1.0))
 
+        # 1D vectors
         x = np.random.random(size=(10,16))
         xn = normalize(x, axis=1)
         self.assertTrue(xn.shape == x.shape)
         for i in range(x.shape[0]):
             self.assertTrue(np.allclose(np.sqrt(np.sum(np.square(xn[i]))), 1.0))
+    
+        # 1D vectors
+        x = np.random.random(size=(10,16))
+        xn = normalize(x, axis=None)
+        self.assertTrue(xn.shape == x.shape)
+        for i in range(x.shape[0]):
+            self.assertTrue(np.allclose(np.sqrt(np.sum(np.square(xn[i]))), 1.0))
+    
+    def test_normalize_2d(self):
         
+        # 2D matrices
         x = np.random.random(size=(10,16,4))
         xn = normalize(x, axis=(1,2))
         self.assertTrue(xn.shape == x.shape)
         for i in range(x.shape[0]):
             self.assertTrue(np.allclose(np.sqrt(np.sum(np.square(xn[i]))), 1.0))
             
+        # 2D matrices
+        x = np.random.random(size=(10,16,4))
+        xn = normalize(x, axis=None)
+        self.assertTrue(xn.shape == x.shape)
+        for i in range(x.shape[0]):
+            self.assertTrue(np.allclose(np.sqrt(np.sum(np.square(xn[i]))), 1.0))
+            
+        # 2D matrices
         x = np.random.random(size=(10,16,4))
         x[0,:,:] = 0.0
         xn = normalize(x, axis=(1,2))

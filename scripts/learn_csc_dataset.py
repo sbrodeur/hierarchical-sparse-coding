@@ -84,50 +84,63 @@ if __name__ == "__main__":
     filePath = os.path.join(cdir, 'multilevel-dict.pkl')
     multilevelDict = MultilevelDictionary.restore(filePath)
     
-    # Load the referencesignal from file
-    filePath = os.path.join(cdir, 'dataset.npz')
-    data = np.load(filePath)
-    signal = data['signal']
-    events = data['events']
+    # Load the reference signal from file
+    filePath = os.path.join(cdir, 'dataset-train.npz')
+    trainData = np.load(filePath)
+    trainSignal = trainData['signal']
+    trainEvents = trainData['events']
+    logger.info('Number of samples in dataset (training): %d' % (len(trainSignal)))
+    logger.info('Number of events in dataset (training): %d' % (len(trainEvents)))
     
-    logger.info('Number of samples in dataset: %d' % (len(signal)))
-    logger.info('Number of events in dataset: %d' % (len(events)))
+    # Load the reference signal from file
+    filePath = os.path.join(cdir, 'dataset-test.npz')
+    testData = np.load(filePath)
+    testSignal = testData['signal']
+    testEvents = testData['events']
+    logger.info('Number of samples in dataset (testing): %d' % (len(testSignal)))
+    logger.info('Number of events in dataset (testing): %d' % (len(testEvents)))
+    
+    testSignal = testSignal[:100000]
     
     # Learning the dictionary
-    logger.info('Learning dictionary...')
-    cdl = ConvolutionalDictionaryLearner(k=64, windowSize=32, algorithm='kmean')
-    D = cdl.train(signal, nbRandomWindows=4096, maxIterations=100, tolerance=0.0, resetMethod='random_samples')
+#     logger.info('Learning dictionary (nmf)...')
+#     cdl = ConvolutionalDictionaryLearner(k=16, windowSize=32, algorithm='nmf')
+#     trainSignal = trainSignal[:10000]
+#     trainSignal -= np.min(trainSignal)
+#     testSignal -= np.min(testSignal)
+#     D = cdl.train(trainSignal, nbMaxIterations=100, initMethod='noise')
+
+#     logger.info('Learning dictionary (kmean)...')
+#     cdl = ConvolutionalDictionaryLearner(k=16, windowSize=32, algorithm='kmean')
+#     D = cdl.train(trainSignal, nbRandomWindows=4096, maxIterations=100, tolerance=0.0, resetMethod='random_samples')
+
+#    logger.info('Learning dictionary (samples)...')
+#    cdl = ConvolutionalDictionaryLearner(k=64, windowSize=32, algorithm='samples')
+#    D = cdl.train(trainSignal)
+
+#    logger.info('Using optimal dictionary...')
+#    D = multilevelDict.dicts[0]
     
     # Visualize dictionary and save to disk as images
     fig = visualize(D, maxCounts=16)
     fig.savefig(os.path.join(cdir, 'learned-dict-l0.eps'), format='eps', dpi=1200)
 
-#     import cProfile, pstats, StringIO
-#     pr = cProfile.Profile()
-#     pr.enable()
-
     logger.info('Encoding signal...')
     cmp = ConvolutionalMatchingPursuit()
     csc = ConvolutionalSparseCoder(D, approximator=cmp)
-    coefficients, residual = csc.encode(signal, nbNonzeroCoefs=None, toleranceSnr=25.0, nbBlocks=1000, alpha=0.5)
-
-#     pr.disable()
-#     s = StringIO.StringIO()
-#     sortby = 'cumulative'
-#     ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
-#     ps.print_stats()
-#     print s.getvalue()
+    coefficients, residual = csc.encode(testSignal, nbNonzeroCoefs=None, toleranceSnr=20.0, nbBlocks=1000, alpha=0.5)
     
-    #plt.show()
+    plt.show()
     
+    # Performance for testing dataset
     pidx_bits = np.ceil(np.log(D.shape[0])/np.log(2))
     sidx_bits = 0
-    c_bits = calculateBitForDatatype(dtype=signal.dtype)
+    c_bits = calculateBitForDatatype(dtype=testSignal.dtype)
     bits = sidx_bits + pidx_bits + c_bits
     bitsEncoded = bits * coefficients.nnz
-    bitsRaw = c_bits * len(signal)
-    logger.info('Bitrate before encoding: %f bit/sample' % (float(bitsRaw) / len(signal)))
-    logger.info('Bitrate after encoding: %f bit/sample' % (float(bitsEncoded) / len(signal)))
+    bitsRaw = c_bits * len(testSignal)
+    logger.info('Bitrate before encoding: %f bit/sample' % (float(bitsRaw) / len(testSignal)))
+    logger.info('Bitrate after encoding: %f bit/sample' % (float(bitsEncoded) / len(testSignal)))
     logger.info('Compression ratio (raw/encoded): %f' % (float(bitsRaw) / bitsEncoded))
     
     logger.info('All done.')

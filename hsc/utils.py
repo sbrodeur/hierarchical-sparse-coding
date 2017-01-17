@@ -51,6 +51,7 @@ def profileFunction(func):
     return s.getvalue()
 
 def findGridSize(l):
+    assert l > 0
     n = int(np.ceil(np.sqrt(l)))
     found = False
     for m in range(n+1):
@@ -62,6 +63,9 @@ def findGridSize(l):
     return m,n
 
 def normalize(X, axis=None):
+    assert X.ndim >= 1
+    if axis is None and X.ndim > 1:
+        axis = tuple([a for a in range(1,X.ndim)])
     l2norms = np.sqrt(np.sum(np.square(X), axis=axis, keepdims=True))
     # Avoid division by zero
     l2norms = np.where(l2norms > 0.0, l2norms, np.ones_like(l2norms))

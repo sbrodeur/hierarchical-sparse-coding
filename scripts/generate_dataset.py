@@ -104,7 +104,7 @@ if __name__ == "__main__":
     multilevelDict = MultilevelDictionary(scales, counts,
                                           decompositionSizes, maxNbPatternsConsecutiveRejected=100)
     # Visualize dictionary and save to disk as images
-    figs = multilevelDict.visualize(maxCounts=9)
+    figs = multilevelDict.visualize(maxCounts=16)
     for l,fig in enumerate(figs):
         fig.savefig(os.path.join(cdir, 'dict-l%d.eps' % (l)), format='eps', dpi=1200)
     
@@ -132,19 +132,23 @@ if __name__ == "__main__":
                 raise Exception("Unable to find the optimal rates: initial rates are too high")
             logger.debug('Rates are too high (bitrate of %f bit/sample at first level): scaling so that maximum rate across levels is %f' % (avgInfoRates[0], np.max(rates)))
     rates = scaledRates
-    logger.info('Optimal rate scale found: %f (for bitrate of %f bit/sample at first level)' % (np.max(rates), avgInfoRates[0]))
+    logger.info('Optimal rate scale found: %4.8f (for bitrate of %f bit/sample at first level)' % (np.max(rates), avgInfoRates[0]))
     
-    # Generate events and signal using the multi-level dictionary
-    logger.info('Generating events and raw temporal signal...')
-    nbSamples = int(1e7)
-    generator = SignalGenerator(multilevelDict, rates)
-    events = generator.generateEvents(nbSamples=nbSamples)
-    signal = generator.generateSignalFromEvents(events, nbSamples=nbSamples)
-    logger.info('Number of generated events: %d' % (len(events)))
+    for datasetName, nbSamples in [('train', int(1e7)), ('test', int(1e6))]:
+    
+        # Generate events and signal using the multi-level dictionary
+        logger.info('Generating events and raw temporal signal for dataset %s...' % (datasetName))
+        generator = SignalGenerator(multilevelDict, rates)
+        events = generator.generateEvents(nbSamples=nbSamples)
+        signal = generator.generateSignalFromEvents(events, nbSamples=nbSamples)
+        logger.info('Number of generated events: %d , in %d samples' % (len(events), len(signal)))
+        
+        # Save signal to disk, as the reference
+        np.savez_compressed('dataset-%s.npz' % (datasetName), signal=signal, events=events, rates=rates)
     
     # Visualize the beginning of the signal and save image to disk
     logger.info('Generating figures for visualization...')
-    shortSignal = signal[:min(100000, len(signal))]
+    shortSignal = signal[:min(10000, len(signal))]
     fig = plt.figure(figsize=(8,4), facecolor='white', frameon=True)
     fig.canvas.set_window_title('Generated signal')
     fig.subplots_adjust(left=0.1, right=0.95, bottom=0.15, top=0.95,
@@ -158,9 +162,6 @@ if __name__ == "__main__":
     ax.set_xlabel('Samples')
     ax.set_ylabel('Amplitude')
     fig.savefig(os.path.join(cdir, 'signal.eps'), format='eps', dpi=1200)
-    
-    # Save signal to disk, as the reference
-    np.savez_compressed('dataset.npz', signal=signal, events=events, rates=rates)
     
     plt.show()
     

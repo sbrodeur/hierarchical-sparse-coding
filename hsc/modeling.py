@@ -30,6 +30,7 @@
 import logging
 import itertools
 import scipy
+import scipy.signal
 import scipy.sparse
 import numpy as np
 from numpy.lib.stride_tricks import as_strided
@@ -39,24 +40,55 @@ from hsc.utils import overlapAdd, overlapReplace, normalize
 logger = logging.getLogger(__name__)
 
 def extractRandomWindows(sequence, nbWindows, width):
+    assert sequence.ndim == 1 or sequence.ndim == 2
     assert nbWindows > 0
     assert width > 0 and width < sequence.shape[0]
     
     # Generate random indices
-    indices = np.random.randint(low=0, high=len(sequence)-width, size=(nbWindows,))
+    indices = np.random.randint(low=0, high=sequence.shape[0]-width, size=(nbWindows,))
+    return extractWindows(sequence, indices, width, centered=False)
+    
+def extractWindows(sequence, indices, width, centered=False):
+    assert sequence.ndim == 1 or sequence.ndim == 2
+    assert width > 0 and width < sequence.shape[0]
+
+    if sequence.ndim == 1:
+        sequence = sequence[:,np.newaxis]
+        squeezeOutput = True
+    else:
+        squeezeOutput = False
     
     # Create a strided view of the sequence and using indexing to extract windows
-    s = as_strided(sequence, shape=(len(sequence)-width+1, width), strides=sequence.strides*2)
-    windows = s[indices]
+    s = as_strided(sequence, shape=((sequence.shape[0] - width + 1), width, sequence.shape[1]),
+                   strides=(sequence.strides[0], sequence.strides[0], sequence.strides[1]))
+    
+    if centered:
+        if np.mod(width, 2) == 0:
+            # Even
+            windows = s[indices - (width/2-1)]
+        else:
+            # Odd
+            windows = s[indices - (width/2)]
+    else:
+        windows = s[indices]
+        
+    if squeezeOutput:
+        windows = np.squeeze(windows, axis=2)
     return windows
     
-def extractWindows(sequences, indices, width, centered=False):
+def extractWindowsBatch(sequences, indices, width, centered=False):
+    assert sequences.ndim == 2 or sequences.ndim == 3
     assert width > 0 and width < sequences.shape[1]
     
-    # sequences has shape [batch, nbSamples, nbFeatures]
-
+    if sequences.ndim == 2:
+        sequences = sequences[:,:,np.newaxis]
+        squeezeOutput = True
+    else:
+        squeezeOutput = False
+    
     # Create a strided view of the sequence and using indexing to extract windows
-    s = as_strided(sequences, shape=(sequences.shape[0], sequences.shape[1]-width+1, width), strides=(sequences.strides[0], sequences.strides[1], sequences.strides[1]))
+    s = as_strided(sequences, shape=(sequences.shape[0], (sequences.shape[1] - width + 1), width, sequences.shape[2]),
+                  strides=(sequences.strides[0], sequences.strides[1], sequences.strides[1], sequences.strides[2]))
 
     i = np.arange(s.shape[0])
     if centered:
@@ -68,35 +100,11 @@ def extractWindows(sequences, indices, width, centered=False):
             windows = s[i, indices - (width/2)]
     else:
         windows = s[i, indices]
+        
+    if squeezeOutput:
+        windows = np.squeeze(windows, axis=2)
+        
     return windows
-    
-# def kmeanPP(data, k, windowSize):
-#     
-#     # Start with an element chosen uniformly amongst data
-#     means = extractRandomWindows(data, 1, windowSize)
-#     for c in range(1, k):
-# 
-#         # Calculate the distance with existing centroids
-#         distances = np.sum(tf.square(data[np.newaxis,:] - means[:, np.newaxis]), axis=2)
-#         distances_nearest = np.max(distances, axis=0)
-# 
-#         # Select a new centroids randomly, proportional to the squared distance to the nearest centroid
-#         prob = np.square(distances_nearest) / np.sum(np.square(distances_nearest))
-# 
-#         # Calculate the cumulative sum
-#         # https://github.com/tensorflow/tensorflow/issues/813
-#         # WARNING: this is not efficient!
-#         cprob = tf.pad(prob, paddings=tf.expand_dims(tf.concat(0, [tf.shape(x)[0:1]-1,[0]]),0))
-#         cprob = tf.reshape(cprob, [1,-1,1,1])
-#         cfilter = tf.reshape(tf.ones_like(cprob), [-1,1,1,1])
-#         cumsum = tf.nn.conv2d(cprob, cfilter, strides=[1,1,1,1], padding='VALID')
-# 
-#         # Multinomial sampling
-#         idx = tf.cast(tf.reduce_min(tf.where(tf.greater_equal(cumsum, tf.random_uniform(tf.shape(prob))))), tf.int32)
-#         mean = tf.slice(tf.random_shuffle(x), tf.concat(0, [tf.expand_dims(idx, 0), [0,]]), [1,-1,])
-# 
-#         # Add the centroid to codebook
-#         means = tf.concat(0, [means, mean])
     
 def convolve1d(sequence, filters, padding='valid'):
 
@@ -124,8 +132,8 @@ def convolve1d(sequence, filters, padding='valid'):
     assert nbFeatures == sequence.shape[-1]
 
     # Create a strided view of the sequence
-    w = as_strided(sequence, ((sequence.shape[0] - width + 1), sequence.shape[1], width),
-                  (sequence.strides[0], sequence.strides[1], sequence.strides[0])) 
+    w = as_strided(sequence, shape=((sequence.shape[0] - width + 1), sequence.shape[1], width),
+                  strides=(sequence.strides[0], sequence.strides[1], sequence.strides[0])) 
     
     # w has shape [length, features, width]
     nbTotalFeatureDim = np.prod(filters.shape[1:])
@@ -159,10 +167,8 @@ def convolve1d_batch(sequences, filters, padding='valid'):
     assert nbFeatures == sequences.shape[-1]
 
     # Create a strided view of the sequence
-    # byte_offset = stride[0]*index[0] + stride[1]*index[1] + ...
-    # shape is (12, 20, 2), dtype is int64 , strides are (320, 16, 8)
-    w = as_strided(sequences, (sequences.shape[0], (sequences.shape[1] - width + 1), sequences.shape[2], width),
-                  (sequences.strides[0], sequences.strides[1], sequences.strides[2], sequences.strides[1]))
+    w = as_strided(sequences, shape=(sequences.shape[0], (sequences.shape[1] - width + 1), sequences.shape[2], width),
+                  strides=(sequences.strides[0], sequences.strides[1], sequences.strides[2], sequences.strides[1]))
     
     # w has shape [batch, length, features, width, 1]
     nbTotalFeatureDim = np.prod(filters.shape[1:])
@@ -183,17 +189,115 @@ class ConvolutionalDictionaryLearner(object):
         windows = extractRandomWindows(data, self.k, self.windowSize)
  
         # Normalize the dictionary elements to have unit norms
-        D = normalize(windows, axis=1)
+        D = normalize(windows)
         return D
  
     def _init_D(self, data, initMethod='random_samples'):
+        assert data.ndim == 1 or data.ndim == 2
+        
+        if data.ndim == 1:
+            squeezeOutput = True
+            data = data[:,np.newaxis]
+        else:
+            squeezeOutput = False
  
         if initMethod == 'noise':
-            D = normalize(np.random.uniform(low=np.min(data), high=np.max(data), size=(self.k, self.windowSize)), axis=1)
+            D = normalize(np.random.uniform(low=np.min(data), high=np.max(data), size=(self.k, self.windowSize, data.shape[-1])), axis=1)
         elif initMethod == 'random_samples':
             D = normalize(extractRandomWindows(data, self.k, self.windowSize), axis=1)
         else:
             raise Exception('Unsupported initialization method: %s' % (initMethod))
+        
+        if squeezeOutput:
+            D = np.squeeze(D, axis=2)
+        
+        return D
+ 
+    def _train_nmf(self, data, initMethod='random_samples', nbMaxIterations=None, toleranceResidualScale=None, toleranceSnr=None):
+        
+        # Define some functions
+        def reconstruct(coefficients, D):
+            # Adapted from: https://github.com/mattwescott/senmf
+            assert D.ndim == 3
+            reconstruction = np.zeros((coefficients.shape[0], D.shape[-1]), dtype=coefficients.dtype)
+            for basis, activation in zip(D, coefficients.T):
+                reconstruction += scipy.signal.fftconvolve(basis.T, np.atleast_2d(activation)).T[:coefficients.shape[0]]
+            return reconstruction
+
+        def calculateMultiplicativeResidual(sequence, D, coefficients):
+            # Adapted from: https://github.com/mattwescott/senmf
+            reconstruction = reconstruct(coefficients, D)
+            residual = sequence / np.abs(reconstruction)
+            return residual
+
+        # Initialize dictionary from the data
+        D = self._init_D(data, initMethod)
+        sequence = data
+
+        if sequence.ndim == 1:
+            sequence = sequence[:,np.newaxis]
+        if D.ndim == 2:
+            D = D[:,:,np.newaxis]
+
+        energySignal = np.sum(np.square(sequence))
+
+        # Initialize the coefficients
+        coefficients = np.random.random((sequence.shape[0], D.shape[0])).astype(sequence.dtype) + 2.0
+        
+        # Loop until convergence or if any stopping criteria is met
+        nbIterations = 0
+        converged = False
+        while not converged:
+        
+            # Update coefficients
+            # Adapted from: https://github.com/mattwescott/senmf
+            for t_prime in range(D.shape[1]):
+                R = calculateMultiplicativeResidual(sequence, D, coefficients)
+                U_A = np.dot(D[:,t_prime,:]/np.atleast_2d(D[:,t_prime,:].sum(axis=1)).T,
+                             R[t_prime:].T)
+                coefficients[:-t_prime or None,:] *= U_A.T
+            
+            # Update dictionary
+            # Adapted from: https://github.com/mattwescott/senmf
+            R = calculateMultiplicativeResidual(sequence, D, coefficients)
+            D_updates = np.zeros_like(D)
+            for t_prime in range(D.shape[1]):
+                U_D = np.dot((coefficients[:-t_prime or None,:]/coefficients[:-t_prime or None,:].sum(axis=0, keepdims=True)).T,
+                             R[t_prime:])
+                D_updates[:,t_prime,:] = U_D
+            D *= D_updates
+            
+            # Normalize dictionary
+            D = normalize(D, axis=(1,2))
+            
+            # Calculate additive residual
+            reconstruction = reconstruct(coefficients, D)
+            residual = sequence - reconstruction
+            
+            # Print information about current iteration
+            residualScale = np.max(np.abs(residual))
+            energyResidual = np.sum(np.square(residual))
+            snr = 10.0*np.log10(energySignal/energyResidual)
+            logger.info('SNR of %f dB achieved after %d iterations' % (snr, nbIterations))
+            nbIterations += 1
+            
+            # Check stopping criteria
+            if nbIterations is not None and nbIterations >= nbMaxIterations:
+                logger.debug('Maximum number of iterations reached')
+                converged = True
+                break
+            if toleranceResidualScale is not None and residualScale <= toleranceResidualScale:
+                logger.debug('Tolerance for residual scale (absolute value) reached')
+                converged = True
+                break
+            if toleranceSnr is not None and snr >= toleranceSnr:
+                logger.debug('Tolerance for signal-to-noise ratio reached')
+                converged = True
+                break
+ 
+        if data.ndim == 1:
+            D = np.squeeze(D, axis=2)
+ 
         return D
  
     def _train_kmean(self, data, nbRandomWindows, maxIterations=100, tolerance=0.0, initMethod='random_samples', resetMethod='noise', nbAveragedPatches=8):
@@ -221,7 +325,7 @@ class ConvolutionalDictionaryLearner(object):
  
             # Extract the patch where there is maximum similarity, and assign it to the centroid.
             maxSampleIndices = indices[0]
-            patches = extractWindows(windows, maxSampleIndices, width=D.shape[1], centered=True)
+            patches = extractWindowsBatch(windows, maxSampleIndices, width=D.shape[1], centered=True)
             assignments = indices[1]
             assert np.max(assignments) < D.shape[0]
  
@@ -248,7 +352,6 @@ class ConvolutionalDictionaryLearner(object):
                         raise Exception('Unsupported reset method: %s' % (resetMethod))
  
                 # Make sure that the centroid has not zero norm
-                # TODO: maybe we could just add the epsilon in all cases?
                 EPS = 1e-9
                 l2norm = np.sqrt(np.sum(np.square(centroid)))
                 if l2norm == 0.0:
@@ -259,10 +362,10 @@ class ConvolutionalDictionaryLearner(object):
             centroids = []
             for c in range(D.shape[0]):
                 centroids.append(computeCentroid(c))
-            centroids = np.vstack(centroids)
+            centroids = np.stack(centroids)
  
             # Normalize the centroids to have unit norms
-            newD = normalize(centroids, axis=1)
+            newD = normalize(centroids)
  
             # Compute distance change
             alpha = np.sqrt(np.sum(np.square(D - newD)))
@@ -278,6 +381,8 @@ class ConvolutionalDictionaryLearner(object):
             D = self._train_samples(X, *args, **kwargs)
         elif self.algorithm == 'kmean':
             D = self._train_kmean(X, *args, **kwargs)
+        elif self.algorithm == 'nmf':
+            D = self._train_nmf(X, *args, **kwargs)
         else:
             raise Exception('Unknown training algorithm: %s' % (self.algorithm))
 
@@ -287,6 +392,80 @@ class SparseApproximator(object):
 
     def computeCoefficients(self, X, D):
         raise NotImplementedError()
+
+class ConvolutionalNMF(SparseApproximator):
+
+    def __init__(self):
+        pass
+
+    def _reconstruct(self, coefficients, D):
+        # Adapted from: https://github.com/mattwescott/senmf
+        if D.ndim > 2:
+            nbFeatures = D.shape[-1]
+        else:
+            nbFeatures = 1
+        reconstruction = np.zeros((coefficients.shape[0], nbFeatures), dtype=coefficients.dtype)
+        for basis, activation in zip(D, coefficients.T):
+            reconstruction += scipy.signal.fftconvolve(basis.T, np.atleast_2d(activation)).T[:coefficients.shape[0]]
+        return reconstruction
+
+    def _calculateMultiplicativeResidual(self, sequence, D, coefficients):
+        # Adapted from: https://github.com/mattwescott/senmf
+        reconstruction = self._reconstruct(coefficients, D)
+        residual = sequence / np.abs(reconstruction)
+        return residual
+
+    def computeCoefficients(self, sequence, D, nbMaxIterations=None, toleranceResidualScale=None, toleranceSnr=None):
+
+        if sequence.ndim == 1:
+            sequence = sequence[:,np.newaxis]
+        if D.ndim == 2:
+            D = D[:,:,np.newaxis]
+
+        energySignal = np.sum(np.square(sequence))
+
+        # Initialize the coefficients
+        coefficients = np.random.random((sequence.shape[0], D.shape[0])).astype(sequence.dtype) + 2.0
+        
+        # Loop until convergence or if any stopping criteria is met
+        nbIterations = 0
+        converged = False
+        while not converged:
+        
+            # Update coefficients
+            # Adapted from: https://github.com/mattwescott/senmf
+            for t_prime in range(D.shape[1]):
+                R = self._calculateMultiplicativeResidual(sequence, D, coefficients)
+                U_A = np.dot(D[:,t_prime,:]/np.atleast_2d(D[:,t_prime,:].sum(axis=1)).T,
+                             R[t_prime:].T)
+                coefficients[:-t_prime or None,:] *= U_A.T
+            
+            # Calculate additive residual
+            reconstruction = self._reconstruct(coefficients, D)
+            residual = sequence - reconstruction
+            
+            # Print information about current iteration
+            residualScale = np.max(np.abs(residual))
+            energyResidual = np.sum(np.square(residual))
+            snr = 10.0*np.log10(energySignal/energyResidual)
+            logger.info('SNR of %f dB achieved after %d iterations' % (snr, nbIterations))
+            nbIterations += 1
+            
+            # Check stopping criteria
+            if nbIterations is not None and nbIterations >= nbMaxIterations:
+                logger.debug('Maximum number of iterations reached')
+                converged = True
+                break
+            if toleranceResidualScale is not None and residualScale <= toleranceResidualScale:
+                logger.debug('Tolerance for residual scale (absolute value) reached')
+                converged = True
+                break
+            if toleranceSnr is not None and snr >= toleranceSnr:
+                logger.debug('Tolerance for signal-to-noise ratio reached')
+                converged = True
+                break
+    
+        return coefficients, residual
 
 class ConvolutionalMatchingPursuit(SparseApproximator):
 
@@ -466,7 +645,6 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             logger.info('Number of non-zero coefficients: %d' % (nnz))
             logger.info('Number of duplicate coefficients: %d' % (nbDuplicates))
 
-
         if minCoefficients is not None:
             # Clip small coefficients to zero
             clippedCoefficients = scipy.sparse.lil_matrix((sequence.shape[0], D.shape[0]))
@@ -480,21 +658,33 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
 class ConvolutionalSparseCoder(object):
  
     def __init__(self, D, approximator):
+        assert D.ndim == 2 or D.ndim == 3
         self.D = D
         self.approximator = approximator
  
     def encode(self, X, *args, **kwargs):
+        assert X.ndim == 1 or X.ndim == 2
         return self.approximator.computeCoefficients(X, self.D, *args, **kwargs)
  
     def reconstruct(self, coefficients):
         assert scipy.sparse.issparse(coefficients)
         
+        # D should be a 3D tensor, with the last dimension being the number of features
+        D = self.D
+        if self.D.ndim == 2:
+            D = D[:,:,np.newaxis]
+        
         # Initialize signal
-        signal = np.zeros((coefficients.shape[0], self.D.shape[-1]))
+        signal = np.zeros((coefficients.shape[0], D.shape[-1]))
         
         # Iterate through all activations and overlap to signal
         cx = coefficients.tocoo()
         for t,fIdx,c in itertools.izip(cx.row, cx.col, cx.data):
-            overlapAdd(signal, c*self.D[fIdx], t, copy=False)
+            overlapAdd(signal, c*D[fIdx], t, copy=False)
+            
+        # Remove feature dimension if necessary
+        if self.D.ndim == 2:
+            signal = np.squeeze(signal, axis=1)
+            
         return signal
     
