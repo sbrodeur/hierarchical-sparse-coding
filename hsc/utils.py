@@ -71,6 +71,33 @@ def normalize(X, axis=None):
     l2norms = np.where(l2norms > 0.0, l2norms, np.ones_like(l2norms))
     return X / l2norms
 
+def peek(signal, width, t):
+    
+    # Peek to the signal, taking into account boundaries
+    startIdx = 0
+    endIdx = width
+    ret = np.array([], dtype=signal.dtype)
+    if np.mod(width, 2) == 0:
+        # Even scale
+        if t-(width/2-1) < 0:
+            startIdx = -(t-(width/2-1))
+        if t+width/2+1 > signal.shape[0]:
+            endIdx = width - (t+width/2+1 - signal.shape[0])
+        
+        if endIdx - startIdx > 0:
+            ret = signal[max(0,t-width/2+1):min(signal.shape[0],t+width/2+1)]
+    else:
+        # Odd scale
+        if t-(width/2) < 0:
+            startIdx = -(t-(width/2))
+        if t+width/2+1 > signal.shape[0]:
+            endIdx = width - (t+width/2+1 - signal.shape[0])
+            
+        if endIdx - startIdx > 0:
+            ret = signal[max(0,t-width/2):min(signal.shape[0],t+width/2+1)]
+
+    return ret
+
 def overlapAdd(signal, element, t, copy=False):
     
     if copy:

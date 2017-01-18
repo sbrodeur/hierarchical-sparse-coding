@@ -31,7 +31,7 @@ import os
 import unittest
 import numpy as np
 
-from hsc.utils import findGridSize, normalize, overlapAdd, overlapReplace, profileFunction
+from hsc.utils import findGridSize, normalize, overlapAdd, overlapReplace, peek, profileFunction
 
 class TestFunctions(unittest.TestCase):
 
@@ -108,6 +108,46 @@ class TestFunctions(unittest.TestCase):
         self.assertTrue(np.allclose(np.sqrt(np.sum(np.square(xn[0]))), 0.0))
         for i in range(1, x.shape[0]):
             self.assertTrue(np.allclose(np.sqrt(np.sum(np.square(xn[i]))), 1.0))
+
+    def test_peek_1d(self):
+        
+        # Odd width
+        sequence = np.arange(8)
+        s = peek(sequence, width=5, t=0)
+        self.assertTrue(np.allclose(s, [0,1,2]))
+        s = peek(sequence, width=5, t=4)
+        self.assertTrue(np.allclose(s, [2,3,4,5,6]))
+        s = peek(sequence, width=5, t=7)
+        self.assertTrue(np.allclose(s, [5,6,7]))
+
+        # Even width
+        sequence = np.arange(8)
+        s = peek(sequence, width=4, t=0)
+        self.assertTrue(np.allclose(s, [0,1,2]))
+        s = peek(sequence, width=4, t=4)
+        self.assertTrue(np.allclose(s, [3,4,5,6]))
+        s = peek(sequence, width=4, t=7)
+        self.assertTrue(np.allclose(s, [6,7]))
+
+    def test_peek_2d(self):
+        
+        # Odd width
+        sequence = np.arange(16).reshape((8,2))
+        s = peek(sequence, width=5, t=0)
+        self.assertTrue(np.allclose(s, [[0,1],[2,3],[4,5]]))
+        s = peek(sequence, width=5, t=4)
+        self.assertTrue(np.allclose(s, [[4,5],[6,7],[8,9],[10,11],[12,13]]))
+        s = peek(sequence, width=5, t=7)
+        self.assertTrue(np.allclose(s, [[10,11],[12,13],[14,15]]))
+
+        # Even width
+        sequence = np.arange(16).reshape((8,2))
+        s = peek(sequence, width=4, t=0)
+        self.assertTrue(np.allclose(s, [[0,1],[2,3],[4,5]]))
+        s = peek(sequence, width=4, t=4)
+        self.assertTrue(np.allclose(s, [[6,7],[8,9],[10,11],[12,13]]))
+        s = peek(sequence, width=4, t=7)
+        self.assertTrue(np.allclose(s, [[12,13],[14,15]]))
 
     def test_overlapAdd(self):
         sequence = np.zeros(8)

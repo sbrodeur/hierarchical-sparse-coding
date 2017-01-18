@@ -35,7 +35,7 @@ import scipy.sparse
 import numpy as np
 from numpy.lib.stride_tricks import as_strided
 
-from hsc.utils import overlapAdd, overlapReplace, normalize
+from hsc.utils import overlapAdd, overlapReplace, normalize, peek
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +177,44 @@ def convolve1d_batch(sequences, filters, padding='valid'):
     c = c.reshape(w.shape[0], w.shape[1], filters.shape[0])
     return c
 
+def reconstructSignal(coefficients, D):
+    assert coefficients.ndim == 1 or coefficients.ndim == 2
+    assert D.ndim == 2 or D.ndim == 3
+    
+    # D should be a 3D tensor, with the last dimension being the number of features
+    if D.ndim == 2:
+        squeezeOutput = True
+        D = D[:,:,np.newaxis]
+    else:
+        squeezeOutput = False
+    
+    # Initialize signal
+    signal = np.zeros((coefficients.shape[0], D.shape[-1]), dtype=coefficients.dtype)
+    
+    if scipy.sparse.issparse(coefficients):
+        # Iterate through all sparse activations and overlap to signal
+        cx = coefficients.tocoo()
+        for t,fIdx,c in itertools.izip(cx.row, cx.col, cx.data):
+            overlapAdd(signal, c*D[fIdx], t, copy=False)
+    else:
+        # Dense convolution (in Fourier domain)
+        filterWidth = D.shape[1]
+        if np.mod(filterWidth, 2) == 0:
+            # Even
+            offset = filterWidth/2-1
+        else:
+            # Odd
+            offset = filterWidth/2
+
+        # Iterate through all bases of the dictionary
+        for basis, activation in zip(D, coefficients.T):
+            signal += scipy.signal.fftconvolve(basis.T, np.atleast_2d(activation), mode='full').T[offset:offset + coefficients.shape[0]]
+    
+    if squeezeOutput:
+        signal = np.squeeze(signal, axis=1)
+        
+    return signal
+
 class ConvolutionalDictionaryLearner(object):
  
     def __init__(self, k, windowSize, algorithm='kmean'):
@@ -215,21 +253,6 @@ class ConvolutionalDictionaryLearner(object):
  
     def _train_nmf(self, data, initMethod='random_samples', nbMaxIterations=None, toleranceResidualScale=None, toleranceSnr=None):
         
-        # Define some functions
-        def reconstruct(coefficients, D):
-            # Adapted from: https://github.com/mattwescott/senmf
-            assert D.ndim == 3
-            reconstruction = np.zeros((coefficients.shape[0], D.shape[-1]), dtype=coefficients.dtype)
-            for basis, activation in zip(D, coefficients.T):
-                reconstruction += scipy.signal.fftconvolve(basis.T, np.atleast_2d(activation)).T[:coefficients.shape[0]]
-            return reconstruction
-
-        def calculateMultiplicativeResidual(sequence, D, coefficients):
-            # Adapted from: https://github.com/mattwescott/senmf
-            reconstruction = reconstruct(coefficients, D)
-            residual = sequence / np.abs(reconstruction)
-            return residual
-
         # Initialize dictionary from the data
         D = self._init_D(data, initMethod)
         sequence = data
@@ -243,7 +266,19 @@ class ConvolutionalDictionaryLearner(object):
 
         # Initialize the coefficients
         coefficients = np.random.random((sequence.shape[0], D.shape[0])).astype(sequence.dtype) + 2.0
-        
+
+        filterWidth = D.shape[1]
+        if np.mod(filterWidth, 2) == 0:
+            # Even
+            offsetStart = filterWidth/2-1
+            offsetEnd = filterWidth/2
+            cutEndOffset = filterWidth - 1
+        else:
+            # Odd
+            offsetStart = filterWidth/2
+            offsetEnd = filterWidth/2
+            cutEndOffset = filterWidth - 1
+            
         # Loop until convergence or if any stopping criteria is met
         nbIterations = 0
         converged = False
@@ -251,27 +286,32 @@ class ConvolutionalDictionaryLearner(object):
         
             # Update coefficients
             # Adapted from: https://github.com/mattwescott/senmf
-            for t_prime in range(D.shape[1]):
-                R = calculateMultiplicativeResidual(sequence, D, coefficients)
-                U_A = np.dot(D[:,t_prime,:]/np.atleast_2d(D[:,t_prime,:].sum(axis=1)).T,
-                             R[t_prime:].T)
-                coefficients[:-t_prime or None,:] *= U_A.T
+            for t in range(D.shape[1]):
+                # Calculate multiplicative residual
+                coefficientsCentered = np.pad(coefficients[:-filterWidth+1], [(offsetStart,offsetEnd)] + [(0,0) for _ in range(coefficients.ndim-1)], mode='constant')
+                reconstruction = reconstructSignal(coefficientsCentered, D)
+                R = sequence / np.abs(reconstruction)
+                R = np.pad(R[t:], [(0,t)] + [(0,0) for _ in range(R.ndim-1)], mode='constant')
+                U_A = (np.dot(D[:,t,:], R.T) / np.sum(D[:,t,:], axis=1, keepdims=True)).T
+                coefficients *= U_A
             
             # Update dictionary
             # Adapted from: https://github.com/mattwescott/senmf
-            R = calculateMultiplicativeResidual(sequence, D, coefficients)
+            coefficientsCentered = np.pad(coefficients[:-filterWidth+1], [(offsetStart,offsetEnd)] + [(0,0) for _ in range(coefficients.ndim-1)], mode='constant')
+            reconstruction = reconstructSignal(coefficientsCentered, D)
+            R = sequence / np.abs(reconstruction)
             D_updates = np.zeros_like(D)
-            for t_prime in range(D.shape[1]):
-                U_D = np.dot((coefficients[:-t_prime or None,:]/coefficients[:-t_prime or None,:].sum(axis=0, keepdims=True)).T,
-                             R[t_prime:])
-                D_updates[:,t_prime,:] = U_D
+            for t in range(D.shape[1]):
+                U_D = np.dot(coefficients[:-t or None,:].T, R[t:]) / coefficients[:-t or None,:].sum(axis=0, keepdims=True).T
+                D_updates[:,t,:] = U_D
             D *= D_updates
             
             # Normalize dictionary
             D = normalize(D, axis=(1,2))
             
             # Calculate additive residual
-            reconstruction = reconstruct(coefficients, D)
+            coefficientsCentered = np.pad(coefficients[:-filterWidth+1], [(offsetStart,offsetEnd)] + [(0,0) for _ in range(coefficients.ndim-1)], mode='constant')
+            reconstruction = reconstructSignal(coefficientsCentered, D)
             residual = sequence - reconstruction
             
             # Print information about current iteration
@@ -398,35 +438,37 @@ class ConvolutionalNMF(SparseApproximator):
     def __init__(self):
         pass
 
-    def _reconstruct(self, coefficients, D):
-        # Adapted from: https://github.com/mattwescott/senmf
-        if D.ndim > 2:
-            nbFeatures = D.shape[-1]
-        else:
-            nbFeatures = 1
-        reconstruction = np.zeros((coefficients.shape[0], nbFeatures), dtype=coefficients.dtype)
-        for basis, activation in zip(D, coefficients.T):
-            reconstruction += scipy.signal.fftconvolve(basis.T, np.atleast_2d(activation)).T[:coefficients.shape[0]]
-        return reconstruction
-
-    def _calculateMultiplicativeResidual(self, sequence, D, coefficients):
-        # Adapted from: https://github.com/mattwescott/senmf
-        reconstruction = self._reconstruct(coefficients, D)
-        residual = sequence / np.abs(reconstruction)
-        return residual
-
     def computeCoefficients(self, sequence, D, nbMaxIterations=None, toleranceResidualScale=None, toleranceSnr=None):
+        assert sequence.ndim == 1 or sequence.ndim == 2
+        assert D.ndim == 2 or D.ndim == 3
 
         if sequence.ndim == 1:
+            squeezeOutput = True
             sequence = sequence[:,np.newaxis]
+        else:
+            squeezeOutput = False
+            
         if D.ndim == 2:
+            squeezeOutput = True
             D = D[:,:,np.newaxis]
 
         energySignal = np.sum(np.square(sequence))
 
         # Initialize the coefficients
         coefficients = np.random.random((sequence.shape[0], D.shape[0])).astype(sequence.dtype) + 2.0
-        
+
+        filterWidth = D.shape[1]
+        if np.mod(filterWidth, 2) == 0:
+            # Even
+            offsetStart = filterWidth/2-1
+            offsetEnd = filterWidth/2
+            cutEndOffset = filterWidth - 1
+        else:
+            # Odd
+            offsetStart = filterWidth/2
+            offsetEnd = filterWidth/2
+            cutEndOffset = filterWidth - 1
+            
         # Loop until convergence or if any stopping criteria is met
         nbIterations = 0
         converged = False
@@ -434,14 +476,20 @@ class ConvolutionalNMF(SparseApproximator):
         
             # Update coefficients
             # Adapted from: https://github.com/mattwescott/senmf
-            for t_prime in range(D.shape[1]):
-                R = self._calculateMultiplicativeResidual(sequence, D, coefficients)
-                U_A = np.dot(D[:,t_prime,:]/np.atleast_2d(D[:,t_prime,:].sum(axis=1)).T,
-                             R[t_prime:].T)
-                coefficients[:-t_prime or None,:] *= U_A.T
+            for t in range(D.shape[1]):
+                
+                # Calculate multiplicative residual
+                coefficientsCentered = np.pad(coefficients[:-filterWidth+1], [(offsetStart,offsetEnd)] + [(0,0) for _ in range(coefficients.ndim-1)], mode='constant')
+                reconstruction = reconstructSignal(coefficientsCentered, D)
+                R = sequence / np.abs(reconstruction)
+                R = np.pad(R[t:], [(0,t)] + [(0,0) for _ in range(R.ndim-1)], mode='constant')
+                
+                U_A = (np.dot(D[:,t,:], R.T) / np.sum(D[:,t,:], axis=1, keepdims=True)).T
+                coefficients *= U_A
             
             # Calculate additive residual
-            reconstruction = self._reconstruct(coefficients, D)
+            coefficientsCentered = np.pad(coefficients[:-filterWidth+1], [(offsetStart,offsetEnd)] + [(0,0) for _ in range(coefficients.ndim-1)], mode='constant')
+            reconstruction = reconstructSignal(coefficientsCentered, D)
             residual = sequence - reconstruction
             
             # Print information about current iteration
@@ -464,6 +512,11 @@ class ConvolutionalNMF(SparseApproximator):
                 logger.debug('Tolerance for signal-to-noise ratio reached')
                 converged = True
                 break
+    
+        coefficients = coefficientsCentered
+    
+        if squeezeOutput:
+            residual = np.squeeze(residual, axis=1)
     
         return coefficients, residual
 
@@ -544,6 +597,8 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         # Initialize the residual and sparse coefficients
         energySignal = np.sum(np.square(sequence))
         residual = np.copy(sequence)
+        energyResidual = energySignal
+        
         coefficients = scipy.sparse.lil_matrix((sequence.shape[0], D.shape[0]))
         
         # Convolve the input signal once, then locally recompute the affected projections when the residual is changed. 
@@ -577,7 +632,10 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
     
                 # Update the residual by removing the contribution of the selected filter
                 # NOTE: negate the coefficient to actually perform a overlap-remove operation.
+                localEnergyBefore = np.sum(np.square(peek(residual, D.shape[1], t)))
                 overlapAdd(residual, -coefficient*D[fIdx], t, copy=False)
+                localEnergyAfter = np.sum(np.square(peek(residual, D.shape[1], t)))
+                energyResidual -= (localEnergyBefore - localEnergyAfter)
                 
                 # Update the inner products
                 # First, calculate the span of the residual that needs to be convolved again, 
@@ -607,14 +665,9 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
                 assert localInnerProducts.shape[0] == width + (width-1)
                 overlapReplace(innerProducts, localInnerProducts, t, copy=False)
                 
-                if verbose:
-                    # Print information about current iteration
-                    # WARNING: !!! Calculating the statistics on the residual is time-consuming !!!
-                    residualScale = np.max(np.abs(residual))
-                    energyResidual = np.sum(np.square(residual))
-                    snr = 10.0*np.log10(energySignal/energyResidual)
-                    logger.debug('Matching pursuit iteration %d: event is (t = %d, f = %d, c = %f), snr = %f dB, residual scale = %f' % (nbIterations, t, fIdx, coefficient, snr, residualScale))
-                    
+                # Print information about current iteration
+                snr = 10.0*np.log10(energySignal/energyResidual)
+                logger.debug('Matching pursuit iteration %d: event is (t = %d, f = %d, c = %f), snr = %f dB' % (nbIterations, t, fIdx, coefficient, snr))
                 nbIterations += 1
                 
                 # Check stopping criteria (fast)
@@ -622,17 +675,15 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
                     logger.debug('Tolerance for number of non-zero coefficients reached')
                     converged = True
                     break
-            
+                if toleranceSnr is not None and snr >= toleranceSnr:
+                    logger.debug('Tolerance for signal-to-noise ratio reached')
+                    converged = True
+                    break
+                
             # Check stopping criteria (slow)
             residualScale = np.max(np.abs(residual))
-            energyResidual = np.sum(np.square(residual))
-            snr = 10.0*np.log10(energySignal/energyResidual)
-            
             if toleranceResidualScale is not None and residualScale <= toleranceResidualScale:
                 logger.debug('Tolerance for residual scale (absolute value) reached')
-                converged = True
-            if toleranceSnr is not None and snr >= toleranceSnr:
-                logger.debug('Tolerance for signal-to-noise ratio reached')
                 converged = True
 
             if len(tIndices) == 0:
@@ -672,24 +723,6 @@ class ConvolutionalSparseCoder(object):
         return self.approximator.computeCoefficients(X, self.D, *args, **kwargs)
  
     def reconstruct(self, coefficients):
-        assert scipy.sparse.issparse(coefficients)
-        
-        # D should be a 3D tensor, with the last dimension being the number of features
-        D = self.D
-        if self.D.ndim == 2:
-            D = D[:,:,np.newaxis]
-        
-        # Initialize signal
-        signal = np.zeros((coefficients.shape[0], D.shape[-1]))
-        
-        # Iterate through all activations and overlap to signal
-        cx = coefficients.tocoo()
-        for t,fIdx,c in itertools.izip(cx.row, cx.col, cx.data):
-            overlapAdd(signal, c*D[fIdx], t, copy=False)
-            
-        # Remove feature dimension if necessary
-        if self.D.ndim == 2:
-            signal = np.squeeze(signal, axis=1)
-            
-        return signal
+        assert coefficients.ndim == 1 or coefficients.ndim == 2
+        return reconstructSignal(coefficients, self.D)
     

@@ -34,29 +34,29 @@ import scipy
 import scipy.sparse
 import numpy as np
 
-from hsc.modeling import ConvolutionalMatchingPursuit, ConvolutionalSparseCoder, ConvolutionalDictionaryLearner, extractRandomWindows, convolve1d, convolve1d_batch, extractWindows, extractWindowsBatch, ConvolutionalNMF
+from hsc.modeling import ConvolutionalMatchingPursuit, ConvolutionalSparseCoder, ConvolutionalDictionaryLearner, extractRandomWindows, convolve1d, convolve1d_batch, extractWindows, extractWindowsBatch, reconstructSignal, ConvolutionalNMF
 from hsc.utils import normalize, overlapAdd
 
 class TestConvolutionalNMF(unittest.TestCase):
 
     def test_computeCoefficients_1d(self):
         
-        for dsize in [1,2,3]:
-            for dwidth in [3,5,6]:
-                cnmf = ConvolutionalNMF()
-                sequence = np.random.random(size=(16,))
-                D = normalize(np.random.random(size=(dsize,dwidth)), axis=1)
-                coefficients, residual = cnmf.computeCoefficients(sequence, D, nbMaxIterations=10)
-                self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
+        for filterWidth in [5,9,16]:
+            cnmf = ConvolutionalNMF()
+            sequence = np.random.random(size=(256,))
+            D = normalize(np.random.random(size=(16,filterWidth)), axis=1)
+            coefficients, residual = cnmf.computeCoefficients(sequence, D, nbMaxIterations=10)
+            self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
         
     def test_computeCoefficients_2d(self):
         
-        nbFeatures = 7
-        cnmf = ConvolutionalNMF()
-        sequence = np.random.random(size=(64,nbFeatures))
-        D = normalize(np.random.random(size=(16,15,nbFeatures)), axis=(1,2))
-        coefficients, residual = cnmf.computeCoefficients(sequence, D, nbMaxIterations=100)
-        self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
+        for filterWidth in [5,9,16]:
+            nbFeatures = 7
+            cnmf = ConvolutionalNMF()
+            sequence = np.random.random(size=(64,nbFeatures))
+            D = normalize(np.random.random(size=(16,15,nbFeatures)), axis=(1,2))
+            coefficients, residual = cnmf.computeCoefficients(sequence, D, nbMaxIterations=10)
+            self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
         
 class TestConvolutionalDictionaryLearner(unittest.TestCase):
 
@@ -269,43 +269,57 @@ class TestConvolutionalSparseCoder(unittest.TestCase):
     def test_reconstruct_1d(self):
         
         # 1D sequence, variable tolerance for residual
-        for tolerance in [0.5, 0.1, 0.001, 0.000001]:
+        for tolerance in [0.5, 0.1, 0.001]:
+            for filterWidth in [7, 10]:
+                cmp = ConvolutionalMatchingPursuit()
+                nbComponents = 32
+                D = normalize(np.random.random(size=(nbComponents, filterWidth)), axis=1)
+                csc = ConvolutionalSparseCoder(D, approximator=cmp)
                 
-            cmp = ConvolutionalMatchingPursuit()
-            nbComponents = 32
-            filterWidth = 9
-            D = normalize(np.random.random(size=(nbComponents, filterWidth)), axis=1)
-            csc = ConvolutionalSparseCoder(D, approximator=cmp)
-            
-            sequence = np.random.random(size=(256,))
-            coefficients, residual = csc.encode(sequence, nbNonzeroCoefs=None, toleranceResidualScale=tolerance)
+                sequence = np.random.random(size=(256,))
+                coefficients, residual = csc.encode(sequence, nbNonzeroCoefs=None, toleranceResidualScale=tolerance)
+                    
+                # Using sparse format
+                sequenceRecons = csc.reconstruct(coefficients)
+                self.assertTrue(np.allclose(sequenceRecons.shape, sequence.shape))
+                residualRecons = sequence - sequenceRecons
+                self.assertTrue(np.max(np.abs(residualRecons)) < tolerance)
+                self.assertTrue(np.allclose(residual, residualRecons, atol=1e6))
                 
-            sequenceRecons = csc.reconstruct(coefficients)
-            residualRecons = sequence - sequenceRecons
-            self.assertTrue(np.allclose(sequenceRecons.shape, sequence.shape))
-            self.assertTrue(np.max(np.abs(residualRecons)) < tolerance)
-            self.assertTrue(np.allclose(residual, residualRecons, atol=1e6))
+                # Using dense format
+                sequenceRecons = csc.reconstruct(coefficients.toarray())
+                self.assertTrue(np.allclose(sequenceRecons.shape, sequence.shape))
+                residualRecons = sequence - sequenceRecons
+                self.assertTrue(np.max(np.abs(residualRecons)) < tolerance)
+                self.assertTrue(np.allclose(residual, residualRecons, atol=1e6))
 
     def test_reconstruct_2d(self):
 
         # 2D sequence, variable tolerance for residual
-        for tolerance in [0.5, 0.1, 0.001, 0.000001]:
-
-            cmp = ConvolutionalMatchingPursuit()
-            nbComponents = 32
-            filterWidth = 9
-            nbFeatures = 7
-            D = normalize(np.random.random(size=(nbComponents, filterWidth, nbFeatures)), axis=(1,2))
-            csc = ConvolutionalSparseCoder(D, approximator=cmp)
-            
-            sequence = np.random.random(size=(256, nbFeatures))
-            coefficients, residual = csc.encode(sequence, nbNonzeroCoefs=None, toleranceResidualScale=tolerance)
+        for tolerance in [0.5, 0.1, 0.001]:
+            for filterWidth in [7, 10]:
+                cmp = ConvolutionalMatchingPursuit()
+                nbComponents = 32
+                nbFeatures = 7
+                D = normalize(np.random.random(size=(nbComponents, filterWidth, nbFeatures)), axis=(1,2))
+                csc = ConvolutionalSparseCoder(D, approximator=cmp)
                 
-            sequenceRecons = csc.reconstruct(coefficients)
-            residualRecons = sequence - sequenceRecons
-            self.assertTrue(np.allclose(sequenceRecons.shape, sequence.shape))
-            self.assertTrue(np.max(np.abs(residualRecons)) < tolerance)
-            self.assertTrue(np.allclose(residual, residualRecons, atol=1e6))
+                sequence = np.random.random(size=(256, nbFeatures))
+                coefficients, residual = csc.encode(sequence, nbNonzeroCoefs=None, toleranceResidualScale=tolerance)
+                    
+                # Using sparse format
+                sequenceRecons = csc.reconstruct(coefficients)
+                residualRecons = sequence - sequenceRecons
+                self.assertTrue(np.allclose(sequenceRecons.shape, sequence.shape))
+                self.assertTrue(np.max(np.abs(residualRecons)) < tolerance)
+                self.assertTrue(np.allclose(residual, residualRecons, atol=1e6))
+    
+                # Using dense format
+                sequenceRecons = csc.reconstruct(coefficients.toarray())
+                self.assertTrue(np.allclose(sequenceRecons.shape, sequence.shape))
+                residualRecons = sequence - sequenceRecons
+                self.assertTrue(np.max(np.abs(residualRecons)) < tolerance)
+                self.assertTrue(np.allclose(residual, residualRecons, atol=1e6))
 
 class TestFunctions(unittest.TestCase):
 
@@ -571,7 +585,7 @@ class TestFunctions(unittest.TestCase):
         filters = np.random.uniform(size=(nbFilters, filterWidth))
         c = convolve1d_batch(sequences, filters, padding='valid')
         self.assertTrue(np.array_equal(c.shape, [sequences.shape[0], sequences.shape[1]-filterWidth+1, nbFilters]))
-         
+        
         for nbFeatures in [1,2,5]:
             for filterWidth in [5,6]:
                 sequence = np.arange(16 * nbFeatures).reshape((16, nbFeatures))
@@ -589,9 +603,54 @@ class TestFunctions(unittest.TestCase):
                         else:
                             self.assertTrue(np.allclose(c[b,i+filterWidth/2,i], np.sum(np.square(filters[i]))))
                 
+    def test_reconstructSignal_1d(self):
+        
+        nbComponents = 4
+        filterWidth = 32
+        D = normalize(np.random.random(size=(nbComponents, filterWidth)), axis=1)
+        
+        rows = [32,48,64,96,128,192]
+        cols = [0,3,1,0,2,2]
+        data = [1.0,1.0,0.5,1.0,0.75,2.0]
+        sequence = np.zeros((256,), dtype=np.float32)
+        for i,j,c in zip(rows, cols, data):
+            overlapAdd(sequence, c*D[j], t=i, copy=False)
+        coefficients = scipy.sparse.coo_matrix((data, (rows, cols)), shape=(sequence.shape[0], nbComponents))
+                                     
+        # Using sparse format                       
+        reconstruction = reconstructSignal(coefficients, D)
+        self.assertTrue(np.array_equal(reconstruction.shape, sequence.shape))
+        self.assertTrue(np.allclose(reconstruction, sequence))
+        
+        # Using dense format                       
+        reconstruction = reconstructSignal(coefficients.toarray(), D)
+        self.assertTrue(np.array_equal(reconstruction.shape, sequence.shape))
+        self.assertTrue(np.allclose(reconstruction, sequence))
+                
+    def test_reconstructSignal_2d(self):
+        
+        nbComponents = 4
+        nbFeatures = 2
+        filterWidth = 32
+        D = normalize(np.random.random(size=(nbComponents, filterWidth, nbFeatures)), axis=1)
+        
+        rows = [32,48,64,96,128,192]
+        cols = [0,3,1,0,2,2]
+        data = [1.0,1.0,0.5,1.0,0.75,2.0]
+        sequence = np.zeros((256, nbFeatures), dtype=np.float32)
+        for i,j,c in zip(rows, cols, data):
+            overlapAdd(sequence, c*D[j], t=i, copy=False)
+        coefficients = scipy.sparse.coo_matrix((data, (rows, cols)), shape=(sequence.shape[0], nbComponents))
+                                     
+        # Using sparse format                       
+        reconstruction = reconstructSignal(coefficients, D)
+        self.assertTrue(np.array_equal(reconstruction.shape, sequence.shape))
+        self.assertTrue(np.allclose(reconstruction, sequence))
+        
+        # Using dense format                       
+        reconstruction = reconstructSignal(coefficients.toarray(), D)
+        self.assertTrue(np.array_equal(reconstruction.shape, sequence.shape))
+        self.assertTrue(np.allclose(reconstruction, sequence))
+                
 if __name__ == '__main__':
-#     suite = unittest.TestSuite()
-#     suite.addTest(TestFunctions('test_extractWindowsBatch_1d'))
-#     suite.addTest(TestFunctions('test_extractWindowsBatch_2d'))
-#     unittest.TextTestRunner().run(suite)
     unittest.main()

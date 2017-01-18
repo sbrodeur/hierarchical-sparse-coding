@@ -94,6 +94,11 @@ ENV/
 .pydevproject
 .settings
 
+# Produced data
+*.npz
+*.eps
+*.lprof
+
 # Other files
 *~
 .DS_STORE
