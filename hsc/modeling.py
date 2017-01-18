@@ -539,7 +539,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         
         return t, fIdx
         
-    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None):
+    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, verbose=False):
 
         # Initialize the residual and sparse coefficients
         energySignal = np.sum(np.square(sequence))
@@ -548,7 +548,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         
         # Convolve the input signal once, then locally recompute the affected projections when the residual is changed. 
         innerProducts = convolve1d(residual, D, padding='same')
-        
+                
         # Loop until convergence or if any stopping criteria is met
         nbIterations = 0
         nnz = 0
@@ -607,26 +607,33 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
                 assert localInnerProducts.shape[0] == width + (width-1)
                 overlapReplace(innerProducts, localInnerProducts, t, copy=False)
                 
-                # Print information about current iteration
-                residualScale = np.max(np.abs(residual))
-                energyResidual = np.sum(np.square(residual))
-                snr = 10.0*np.log10(energySignal/energyResidual)
-                logger.debug('Matching pursuit iteration %d: event is (t = %d, f = %d, c = %f), snr = %f dB, residual scale = %f' % (nbIterations, t, fIdx, coefficient, snr, residualScale))
+                if verbose:
+                    # Print information about current iteration
+                    # WARNING: !!! Calculating the statistics on the residual is time-consuming !!!
+                    residualScale = np.max(np.abs(residual))
+                    energyResidual = np.sum(np.square(residual))
+                    snr = 10.0*np.log10(energySignal/energyResidual)
+                    logger.debug('Matching pursuit iteration %d: event is (t = %d, f = %d, c = %f), snr = %f dB, residual scale = %f' % (nbIterations, t, fIdx, coefficient, snr, residualScale))
+                    
                 nbIterations += 1
                 
-                # Check stopping criteria
+                # Check stopping criteria (fast)
                 if nbNonzeroCoefs is not None and nnz >= nbNonzeroCoefs:
                     logger.debug('Tolerance for number of non-zero coefficients reached')
                     converged = True
                     break
-                if toleranceResidualScale is not None and residualScale <= toleranceResidualScale:
-                    logger.debug('Tolerance for residual scale (absolute value) reached')
-                    converged = True
-                    break
-                if toleranceSnr is not None and snr >= toleranceSnr:
-                    logger.debug('Tolerance for signal-to-noise ratio reached')
-                    converged = True
-                    break
+            
+            # Check stopping criteria (slow)
+            residualScale = np.max(np.abs(residual))
+            energyResidual = np.sum(np.square(residual))
+            snr = 10.0*np.log10(energySignal/energyResidual)
+            
+            if toleranceResidualScale is not None and residualScale <= toleranceResidualScale:
+                logger.debug('Tolerance for residual scale (absolute value) reached')
+                converged = True
+            if toleranceSnr is not None and snr >= toleranceSnr:
+                logger.debug('Tolerance for signal-to-noise ratio reached')
+                converged = True
 
             if len(tIndices) == 0:
                 # This means all coefficients are null
@@ -638,8 +645,6 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             offset = not offset
 
             # Print information
-            energyResidual = np.sum(np.square(residual))
-            snr = 10.0*np.log10(energySignal/energyResidual)
             logger.info('SNR of %f dB achieved after %d selection iterations' % (snr, nbSelections))
             logger.info('Number of selection: %d' % (len(tIndices)))
             logger.info('Number of non-zero coefficients: %d' % (nnz))

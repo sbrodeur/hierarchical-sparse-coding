@@ -39,10 +39,10 @@ class TestFunctions(unittest.TestCase):
         
         def func():
             x = np.random.random(size=int(1e5))
-            y = np.argmax(x)
+            return np.argmax(x)
             
-        str = profileFunction(func)
-        self.assertTrue(len(str) > 0)
+        y = profileFunction(func)
+        self.assertTrue(y is not None)
 
     def test_findGridSize(self):
         m,n = findGridSize(16)

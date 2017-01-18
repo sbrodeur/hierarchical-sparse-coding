@@ -39,7 +39,7 @@ def profileFunction(func):
     pr = cProfile.Profile()
     pr.enable()
     
-    func()
+    ret = func()
     
     pr.disable()
     s = StringIO.StringIO()
@@ -48,7 +48,7 @@ def profileFunction(func):
     ps.print_stats()
     logger.info(s.getvalue())
     
-    return s.getvalue()
+    return ret
 
 def findGridSize(l):
     assert l > 0
