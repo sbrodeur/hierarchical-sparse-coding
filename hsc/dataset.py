@@ -29,16 +29,17 @@
 
 
 import os
-import pickle
+import cPickle as pickle
 import collections
 import logging
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 
-logger = logging.getLogger(__name__)
+from hsc.analysis import calculateBitForDatatype, calculateMultilevelInformationRates
+from hsc.utils import findGridSize, overlapAdd, normalize
 
-from hsc.utils import findGridSize, overlapAdd
+logger = logging.getLogger(__name__)
 
 class Perlin(object):
     """
@@ -101,26 +102,272 @@ class Perlin(object):
         g = np.where(hash & 8, -np.ones_like(g), g)
         return g * x
 
+class MultilevelDecompositionException(Exception):
+    pass
+
 class MultilevelDictionary(object):
     
-    def __init__(self, scales, counts, decompositionSize=4, positionSampling='random', maxNbPatternsConsecutiveRejected=100):
+    def __init__(self, dictionaries, scales, representations, decompositions):
+        assert len(dictionaries) > 0
+        assert len(scales) > 0
+        
+        self.dictionaries = dictionaries
+        self.scales = scales
+        self.representations = representations
+        self.decompositions = decompositions
+        
+        if decompositions is not None:
+            self.counts = np.array( [dictionaries[0].shape[0]] + [len(decomposition) for decomposition in decompositions], np.int)
+        else:
+            self.counts = np.array([dictionary.shape[0] for dictionary in dictionaries], dtype=np.int)
+
+    @classmethod
+    def fromRawDictionaries(cls, dictionaries, scales):
+        assert len(dictionaries) > 0
+        assert len(scales) > 0
+        
+        # Calculate decompositions and representations
+        # Loop for all levels
+        decompositions = []
+        representations = [dictionaries[0],]
+        for level, dictionary in enumerate(dictionaries):
+            if level == 0:
+                continue
+            
+            # Loop for all patterns in the dictionary at current level
+            levelDecompositions = []
+            levelRepresentations = []
+            for pattern in dictionary:
+                nnzMask = np.where(np.abs(pattern) > 0.0)
+                if len(nnzMask[0]) > 0:
+                    coefficients = pattern[nnzMask]
+                    positions, selectedIndices = nnzMask[0], nnzMask[1]
+                    selectedLevels = (level-1) * np.ones_like(positions, dtype=np.int32)
+                    levelDecompositions.append([selectedLevels, selectedIndices, positions, coefficients])
+                    
+                    # Compose each pattern linearly
+                    signal = np.zeros(scales[level], dtype=dictionary.dtype)
+                    for l, i, t, c in zip(selectedLevels, selectedIndices, positions, coefficients):
+                        # Additive overlap to the signal, taking into account boundaries
+                        overlapAdd(signal, element=c*representations[l][i,:], t=t, copy=False)
+                            
+                    # Normalize l2-norm
+                    signal /= np.sqrt(np.sum(np.square(signal)))
+                    
+                    levelRepresentations.append(signal)
+                else:
+                    levelDecompositions.append([])
+                    levelRepresentations.append(np.zeros(scales[level], dtype=dictionary.dtype))
+                    logger.warn('Null pattern found in dictionary at level %d' % (level))
+        
+            decompositions.append(levelDecompositions)
+            representations.append(np.stack(levelRepresentations))
+        
+        return MultilevelDictionary(dictionaries, scales, representations, decompositions)
+
+    @classmethod
+    def fromBaseDictionary(cls, baseDict):
+        assert len(baseDict) > 0
+        return cls(dictionaries=[baseDict,], 
+                   scales=[baseDict.shape[1],], 
+                   representations=[baseDict,],
+                   decompositions=None)
+
+    @classmethod
+    def fromDecompositions(cls, baseDict, decompositions, scales):
+        assert decompositions is not None and len(decompositions) > 0
+        assert len(scales) > 0
+        
+        # Compute dictionaries (if possible)
+        # Loop over all higher levels
+        logger.debug('Precomputing raw dictionaries from base dictionary and decompositions...')
+        dictionaries = [baseDict,]
+        try:
+            counts = np.array( [dictionaries[0].shape[0]] + [len(decomposition) for decomposition in decompositions], np.int)
+            for level in range(1, len(scales)):
+            
+                # Loop over all patterns to compose into dense coefficient vector
+                bases = []
+                for selectedLevels, selectedIndices, positions, coefficients in decompositions[level-1]:
+                    
+                    # Compose each pattern
+                    basis = np.zeros((scales[level], counts[level-1]), dtype=coefficients.dtype)
+                    if not np.array_equal(selectedLevels, (level-1) * np.ones_like(selectedLevels)):
+                        raise MultilevelDecompositionException('Can only convert to dense level dictionaries when the decomposition is on the previous level only.')
+                    basis[positions, selectedIndices] = coefficients
+                    
+                    # Normalize
+                    basis /= np.sqrt(np.sum(np.square(basis)))
+                    
+                    bases.append(basis)
+                    
+                bases = np.stack(bases)
+                dictionaries.append(bases)
+        except MultilevelDecompositionException:
+            logger.warn('Can not precompute dictionary because decomposition is detected to be multilevel')
+        
+        # Loop over all levels
+        logger.debug('Precomputing input-level representations from base dictionary and decompositions...')
+        representations = [baseDict,]
+        for scale, levelDecompositions in zip(scales[1:], decompositions):
+        
+            # Loop over all patterns to compose into a discrete signal at current level
+            levelRepresentations = []
+            for selectedLevels, selectedIndices, positions, coefficients in levelDecompositions:
+                
+                # Compose each pattern linearly
+                signal = np.zeros(scale, dtype=baseDict.dtype)
+                for l, i, t, c in zip(selectedLevels, selectedIndices, positions, coefficients):
+                    # Additive overlap to the signal, taking into account boundaries
+                    overlapAdd(signal, element=c*representations[l][i,:], t=t, copy=False)
+                        
+                # Normalize l2-norm
+                signal /= np.sqrt(np.sum(np.square(signal)))
+                
+                levelRepresentations.append(signal)
+                
+            representations.append(np.stack(levelRepresentations))
+        
+        return cls(dictionaries, scales, representations, decompositions)
+
+    def withSingletonBases(self):
+        
+        if self.getNbLevels() > 1:
+            
+            # Loop over all higher levels
+            newDictionaries = [self.dictionaries[0], ]
+            newCounts = [self.counts[0],]
+            for level in range(1, self.getNbLevels()):
+                D = self.dictionaries[level]
+                
+                if level > 1:
+                    # Expand dictionary on the feature axis to cover extra singleton at previous level
+                    nbInputFeatures = newDictionaries[level-1].shape[0]
+                    D = np.pad(D, [(0,0),(0,0),(nbInputFeatures - D.shape[-1],0)], mode='constant')
+                assert D.shape[-1] == newDictionaries[level-1].shape[0]
+                
+                # Expand dictionary with extra singleton bases
+                nbSingletons = newCounts[level-1]
+                singletons = np.zeros((nbSingletons,) + D.shape[1:], D.dtype)
+                indices = np.arange(nbSingletons)
+                
+                # NOTE: the singleton is already normalized
+                filterWidth = D.shape[1]
+                if np.mod(filterWidth, 2) == 0:
+                    # Even size
+                    offset = filterWidth/2-1
+                else:
+                    # Odd size
+                    offset = filterWidth/2
+                singletons[indices, offset, indices] = 1.0
+                
+                newD = np.concatenate((singletons, D), axis=0)
+                newDictionaries.append(newD)
+                newCounts.append(newD.shape[0])
+            
+            # Create a new instance with expanded dictionaries
+            instance = MultilevelDictionary.fromRawDictionaries(newDictionaries, self.scales)
+            
+        else:
+            logger.warn('Could not add expanded bases since there is only one level')
+            instance = self
+
+        return instance
+
+    def visualize(self, maxCounts=None):
+        figs = []
+        for level, count in enumerate(self.counts):
+            fig = plt.figure(figsize=(8,8), facecolor='white', frameon=True)
+            fig.canvas.set_window_title('Level %d dictionary' % (level))
+            fig.subplots_adjust(left=0.05, right=0.95, bottom=0.05, top=0.95,
+                                hspace=0.01, wspace=0.01)
+            
+            if maxCounts is not None:
+                if isinstance(maxCounts, collections.Iterable):
+                    count = min(count, int(maxCounts[level]))
+                else:
+                    count = min(count, int(maxCounts))
+                
+            m,n = findGridSize(count)
+            
+            dict = self.representations[level][:count]
+            idx = 0
+            for i in range(m):
+                for j in range(n):
+                    ax = fig.add_subplot(m,n,idx+1)
+                    ax.plot(dict[idx], linewidth=2, color='k')
+                    r = np.max(np.abs(dict[idx]))
+                    ax.set_ylim(-r, r)
+                    ax.set_axis_off()
+                    idx += 1
+                    if idx >= count:
+                        break
+        
+            figs.append(fig)
+        
+        return figs
+
+    @staticmethod
+    def restore(filePath):
+        filePath = os.path.abspath(filePath)
+        _, format = os.path.splitext(filePath)
+        if format == '.pkl' or format == '.p':
+            with open(filePath, "rb" ) as f:
+                instance = pickle.load(f)
+        else:
+            raise Exception('Unsupported format: %s' % (format))
+        return instance
+    
+    def save(self, filePath):
+        filePath = os.path.abspath(filePath)
+        _, format = os.path.splitext(filePath)
+        if format == '.pkl' or format == '.p':
+            with open(filePath, "wb" ) as f:
+                pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
+        else:
+            raise Exception('Unsupported format: %s' % (format))
+
+    def getNbLevels(self):
+        return len(self.scales)
+    
+    def getRawDictionary(self, level):
+        assert level >= 0 and level < self.getNbLevels()
+        return self.dictionaries[level]
+
+    def getBaseDictionary(self):
+        return self.dictionaries[0]
+
+    def getMultiscaleDictionaries(self):
+        # Return the precomputed representations at the input level
+        return self.representations
+
+class MultilevelDictionaryGenerator(object):
+    
+    def __init__(self):
+        pass
+
+    def generate(self, scales, counts, decompositionSize=4, positionSampling='random', multilevelDecomposition=True, maxNbPatternsConsecutiveRejected=100):
         assert len(scales) > 0
         assert len(counts) > 0
         assert len(scales) == len(counts)
         
-        self.scales = np.array(scales, np.int)
-        self.counts = np.array(counts, np.int)
-        self.dicts = []
+        scales = np.array(scales, np.int)
+        counts = np.array(counts, np.int)
         
         # Base-level dictionary
-        self.baseDict = self._generateBaseDictionary(counts[0], scales[0], maxNbPatternsConsecutiveRejected)
+        logger.debug('Generating base dictionary...')
+        baseDict = self._generateBaseDictionary(counts[0], scales[0], maxNbPatternsConsecutiveRejected)
         
         # High-level dictionaries
-        if len(self.counts) > 1:
-            self.dicts, self.decompositions = self._generateHighLevelDictionaries(decompositionSize, positionSampling, maxNbPatternsConsecutiveRejected)
+        logger.debug('Generating high-level dictionaries...')
+        if len(counts) > 1:
+            decompositions = self._generateHighLevelDecompositions(baseDict, scales, counts, decompositionSize, positionSampling, multilevelDecomposition, maxNbPatternsConsecutiveRejected)
+            multilevelDict = MultilevelDictionary.fromDecompositions(baseDict, decompositions, scales)
         else:
-            self.dicts = [self.baseDict]
-
+            multilevelDict = MultilevelDictionary.fromBaseDictionary(baseDict)
+            
+        return multilevelDict 
+            
     def _generateBaseDictionary(self, nbPatterns, nbPoints, maxNbPatternsConsecutiveRejected=100):
         assert nbPatterns > 0
         assert nbPoints > 0
@@ -180,7 +427,7 @@ class MultilevelDictionary(object):
                             raise Exception("Unable to find the requested number of patterns: maximum correlation is too high")
                         nbPatternsConsecutiveRejected = 0
                         
-                    continue # pragma: no cover
+                    continue # pragma: no cover 
                 
             patterns[nbPatternsFound,:] = y
             nbPatternsFound += 1
@@ -193,12 +440,12 @@ class MultilevelDictionary(object):
     
         return patterns
 
-    def _generateHighLevelDictionaries(self, decompositionSizes, positionSampling='random', maxNbPatternsConsecutiveRejected=100):
+    def _generateHighLevelDecompositions(self, baseDict, scales, counts, decompositionSizes, positionSampling='random', multilevelDecomposition=True, maxNbPatternsConsecutiveRejected=100):
         assert maxNbPatternsConsecutiveRejected > 0
         
-        dicts = [self.baseDict]
+        representations = [baseDict,]
         decompositions = []
-        for level, count in enumerate(self.counts):
+        for level, count in enumerate(counts):
             # Skip first level
             if level == 0:
                 continue
@@ -219,12 +466,30 @@ class MultilevelDictionary(object):
             nbPatternsConsecutiveRejected = 0
             maxCorrelations = np.linspace(0.05, 0.95, 64)
             maxCorrelationIdx = 0
-            patterns = np.zeros((count, self.scales[level]))
+            patterns = np.zeros((count, scales[level]))
             while (nbPatternsFound < count):
             
                 # Random sampling of the lower-level activated patterns
-                selectedLevels = np.random.randint(low=0, high=level, size=decompositionSize)
-                selectedIndices = [np.random.randint(low=0, high=self.counts[selectedLevel]) for selectedLevel in selectedLevels]
+                if multilevelDecomposition:
+                    # Sample from all previous levels
+                    randomLevels = np.random.randint(low=0, high=level, size=decompositionSize)
+                else:
+                    # Sample from previous level only
+                    randomLevels = (level-1) * np.ones((decompositionSize,), dtype=np.int)
+                
+                # NOTE: make sure the same pattern twice (at a particular level) is not selected twice
+                selectedLevels = []
+                selectedIndices = []
+                for l in range(level):
+                    nbSamplesFromLevel = len(np.where(randomLevels == l)[0])
+                    if nbSamplesFromLevel > 0:
+                        if nbSamplesFromLevel > counts[l]:
+                            raise Exception('Unable to decompose to %d items at sublevels: dictionary size at level %d is too low (%d)' % (nbSamplesFromLevel, l, counts[l]))
+                        indices = np.random.permutation(counts[l]).astype(dtype=np.int)
+                        selectedLevels.append(l * np.ones((nbSamplesFromLevel,), dtype=np.int))
+                        selectedIndices.append(indices[:nbSamplesFromLevel])
+                selectedLevels = np.concatenate(selectedLevels)
+                selectedIndices = np.concatenate(selectedIndices)
                 
                 # Random sampling of the time positions of the lower-level activated patterns
                 while True:
@@ -232,14 +497,14 @@ class MultilevelDictionary(object):
                     for selectedLevel in selectedLevels:
                         
                         if positionSampling == 'random':
-                            if np.mod(self.scales[selectedLevel], 2) == 0:
+                            if np.mod(scales[selectedLevel], 2) == 0:
                                 # Even scale
-                                position = np.random.randint(low=self.scales[selectedLevel]/2-1,
-                                                             high=self.scales[level] - self.scales[selectedLevel]/2)
+                                position = np.random.randint(low=scales[selectedLevel]/2-1,
+                                                             high=scales[level] - scales[selectedLevel]/2)
                             else:
                                 # Odd scale
-                                position = np.random.randint(low=self.scales[selectedLevel]/2,
-                                                             high=self.scales[level] - self.scales[selectedLevel]/2)
+                                position = np.random.randint(low=scales[selectedLevel]/2,
+                                                             high=scales[level] - scales[selectedLevel]/2)
                         else:
                             raise Exception('Unsupported position sampling method: %s' % (positionSampling))
                         
@@ -248,15 +513,17 @@ class MultilevelDictionary(object):
                     
                     # Make sure that the positions cover the whole range, and are not too densely located
                     r = float(np.max(positions) - np.min(positions))
-                    if r >= 0.45 * self.scales[level] or decompositionSize == 1:
+                    if r >= 0.45 * scales[level] or decompositionSize == 1:
                         # Position solution found with enough span
                         break
                 
-                # Random sampling of the relative coefficients
+                # Random sampling of the relative coefficients, then normalization
                 coefficients = np.random.uniform(low=0.25, high=1.0, size=decompositionSize)
+                coefficients /= np.sqrt(np.sum(np.square(coefficients)))
+                
                 nbPatternsSampled += 1
                 
-                signal = self._composePattern(level, dicts, selectedLevels, selectedIndices, positions, coefficients)
+                signal = self._composePattern(level, scales, representations, selectedLevels, selectedIndices, positions, coefficients)
 
                 if nbPatternsFound >= 1:
                     # Find maximum dot product agains existing patterns
@@ -287,82 +554,25 @@ class MultilevelDictionary(object):
             logger.info("Maximum correlation between patterns = %f (%f average)" % (np.max(cd), np.mean(cd)))
 
             # Loop over all patterns to compose into a discrete signal
-            levelDict = []
+            levelRepresentations = []
             for selectedLevels, selectedIndices, positions, coefficients in levelDecompositions:
-                signal = self._composePattern(level, dicts, selectedLevels, selectedIndices, positions, coefficients)
-                levelDict.append(signal)
-            dicts.append(np.array(levelDict))
+                signal = self._composePattern(level, scales, representations, selectedLevels, selectedIndices, positions, coefficients)
+                levelRepresentations.append(signal)
+                
+            representations.append(np.array(levelRepresentations))
             decompositions.append(levelDecompositions)
             
-        return dicts, decompositions
+        return decompositions
 
-    def _composePattern(self, level, dicts, selectedLevels, selectedIndices, positions, coefficients):
-        
-        signal = np.zeros(self.scales[level])
-        decompositionSize = len(selectedLevels)
+    def _composePattern(self, level, scales, representations, selectedLevels, selectedIndices, positions, coefficients):
+        signal = np.zeros(scales[level], dtype=coefficients.dtype)
         for l, i, t, c in zip(selectedLevels, selectedIndices, positions, coefficients):
             # Additive overlap to the signal, taking into account boundaries
-            overlapAdd(signal, element=c*dicts[l][i,:], t=t, copy=False)
+            overlapAdd(signal, element=c*representations[l][i,:], t=t, copy=False)
                 
         # Normalize l2-norm
         signal /= np.sqrt(np.sum(np.square(signal)))
         return signal
-
-    def visualize(self, maxCounts=None):
-        figs = []
-        for level, count in enumerate(self.counts):
-            fig = plt.figure(figsize=(8,8), facecolor='white', frameon=True)
-            fig.canvas.set_window_title('Level %d dictionary' % (level))
-            fig.subplots_adjust(left=0.05, right=0.95, bottom=0.05, top=0.95,
-                                hspace=0.01, wspace=0.01)
-            
-            if maxCounts is not None:
-                if isinstance(maxCounts, collections.Iterable):
-                    count = min(count, int(maxCounts[level]))
-                else:
-                    count = min(count, int(maxCounts))
-                
-            m,n = findGridSize(count)
-            
-            dict = self.dicts[level][:count]
-            idx = 0
-            for i in range(m):
-                for j in range(n):
-                    ax = fig.add_subplot(m,n,idx+1)
-                    ax.plot(dict[idx], linewidth=2, color='k')
-                    r = np.max(np.abs(dict[idx]))
-                    ax.set_ylim(-r, r)
-                    ax.set_axis_off()
-                    idx += 1
-                    if idx >= count:
-                        break
-        
-            figs.append(fig)
-        
-        return figs
-
-    @staticmethod
-    def restore(filePath):
-        filePath = os.path.abspath(filePath)
-        _, format = os.path.splitext(filePath)
-        if format == '.pkl' or format == '.p':
-            with open(filePath, "rb" ) as f:
-                instance = pickle.load(f)
-        else:
-            raise Exception('Unsupported format: %s' % (format))
-        return instance
-    
-    def save(self, filePath):
-        filePath = os.path.abspath(filePath)
-        _, format = os.path.splitext(filePath)
-        if format == '.pkl' or format == '.p':
-            with open(filePath, "wb" ) as f:
-                pickle.dump(self, f)
-        else:
-            raise Exception('Unsupported format: %s' % (format))
-
-    def getNbLevels(self):
-        return len(self.dicts)
 
 class SignalGenerator(object):
 
@@ -372,17 +582,43 @@ class SignalGenerator(object):
         self.multilevelDict = multilevelDict
         self.rates = rates
 
-    def generateEvents(self, nbSamples=1000):
+    def _estimateOptimalRates(self, minimumCompressionRatio):
+        
+        dtype = np.float32
+        c_bits = calculateBitForDatatype(dtype)
+        factors = np.linspace(1e-6, 1.0, num=1000)[::-1]
+        factorIdx = 0
+        while True:
+            scaledRates = np.copy(self.rates) * factors[factorIdx]
+            avgInfoRates = calculateMultilevelInformationRates(self.multilevelDict, scaledRates, dtype=dtype)
+            if avgInfoRates[0] <= c_bits * minimumCompressionRatio:
+                # Valid rates found
+                break
+            else:
+                factorIdx += 1
+                if factorIdx >= len(factors):
+                    raise Exception("Unable to find the optimal rates: initial rates are too high")
+                logger.debug('Rates are too high (bitrate of %f bit/sample at first level): scaling so that maximum rate across levels is %f' % (avgInfoRates[0], np.max(self.rates)))
+        logger.info('Optimal rate scale found: %4.8f (for bitrate of %f bit/sample at first level)' % (np.max(scaledRates), avgInfoRates[0]))
+        
+        return scaledRates
+
+    def generateEvents(self, nbSamples=1000, minimumCompressionRatio=None):
+        
+        if minimumCompressionRatio is not None:
+            rates = self._estimateOptimalRates(minimumCompressionRatio)
+        else:
+            rates = self.rates
         
         events = []
         
         # Loop for each scale
         for level, scale in enumerate(self.multilevelDict.scales):
         
-            levelRates = self.rates[level]
+            levelRates = rates[level]
         
             # Loop for each pattern
-            for i, pattern in enumerate(self.multilevelDict.dicts[level]):
+            for i, pattern in enumerate(self.multilevelDict.representations[level]):
         
                 if isinstance(levelRates, collections.Iterable):
                     # Rate specified independently for each pattern
@@ -432,7 +668,7 @@ class SignalGenerator(object):
         signal = np.zeros(nbSamples, dtype=np.float32)
         for t, l, i, c in events:
             # Additive overlap to the signal, taking into account boundaries
-            overlapAdd(signal, element=c*self.multilevelDict.dicts[l][i,:], t=t, copy=False)
+            overlapAdd(signal, element=c*self.multilevelDict.representations[l][i,:], t=t, copy=False)
         
         return signal
                 

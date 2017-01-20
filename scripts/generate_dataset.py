@@ -33,7 +33,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 
-from hsc.dataset import MultilevelDictionary, SignalGenerator
+from hsc.dataset import MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator
 from hsc.analysis import calculateMultilevelInformationRates, calculateBitForDatatype
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,10 @@ if __name__ == "__main__":
     # Fix seed for random number generation for reproducible results
     # !!! DO NOT CHANGE THE SEED IF YOU WISH TO GENERATE THE REFERENCE DATASET !!!
     np.random.seed(42)
-
+    
+    # NOTE: set so that any numerical error will raise an exception
+    np.seterr(all='raise')
+    
     logging.basicConfig(level=logging.INFO)
     cdir = os.path.dirname(os.path.realpath(__file__))
     
@@ -101,45 +104,33 @@ if __name__ == "__main__":
     logger.info('Scales defined for levels: %s' % (str(scales)))
     logger.info('Counts defined for levels: %s' % (str(counts)))
     logger.info('Decomposition sizes defined for levels: %s' % (str(decompositionSizes)))
-    multilevelDict = MultilevelDictionary(scales, counts,
-                                          decompositionSizes, maxNbPatternsConsecutiveRejected=100)
+    
+    mlgd = MultilevelDictionaryGenerator()
+    multilevelDict = mlgd.generate(scales, counts, decompositionSize=decompositionSizes, 
+                                   positionSampling='random', multilevelDecomposition=False, 
+                                   maxNbPatternsConsecutiveRejected=100)
+    
     # Visualize dictionary and save to disk as images
+    logger.info('Generating dictionary visualizations...')
     figs = multilevelDict.visualize(maxCounts=16)
     for l,fig in enumerate(figs):
         fig.savefig(os.path.join(cdir, 'dict-l%d.eps' % (l)), format='eps', dpi=1200)
     
     # Save multi-level dictionary to disk, as the reference
     filePath = os.path.join(cdir, 'multilevel-dict.pkl')
+    logger.info('Saving dictionary to file: %s' % (filePath))
     multilevelDict.save(filePath)
     
-    # Find the optimal rates to achieve about 50% of the raw bitrate when reducing to the first level
-    logger.info('Estimating optimal rates...')
+    # Generate training and testing datasets
+    # NOTE: find the optimal rates to achieve about 50% of the raw bitrate when reducing to the first level
     minimumCompressionRatio = 0.50
-    dtype = np.float32
     rates = generateRateDistribution(multilevelDict.scales, mode='constant')
-    c_bits = calculateBitForDatatype(dtype)
-    factors = np.linspace(1e-6, 1.0, num=1000)[::-1]
-    factorIdx = 0
-    while True:
-        scaledRates = np.copy(rates) * factors[factorIdx]
-        avgInfoRates = calculateMultilevelInformationRates(multilevelDict, scaledRates, dtype=dtype)
-        if avgInfoRates[0] <= c_bits * minimumCompressionRatio:
-            # Valid rates found
-            break
-        else:
-            factorIdx += 1
-            if factorIdx >= len(factors):
-                raise Exception("Unable to find the optimal rates: initial rates are too high")
-            logger.debug('Rates are too high (bitrate of %f bit/sample at first level): scaling so that maximum rate across levels is %f' % (avgInfoRates[0], np.max(rates)))
-    rates = scaledRates
-    logger.info('Optimal rate scale found: %4.8f (for bitrate of %f bit/sample at first level)' % (np.max(rates), avgInfoRates[0]))
-    
     for datasetName, nbSamples in [('train', int(1e7)), ('test', int(1e6))]:
     
         # Generate events and signal using the multi-level dictionary
         logger.info('Generating events and raw temporal signal for dataset %s...' % (datasetName))
         generator = SignalGenerator(multilevelDict, rates)
-        events = generator.generateEvents(nbSamples=nbSamples)
+        events = generator.generateEvents(nbSamples, minimumCompressionRatio)
         signal = generator.generateSignalFromEvents(events, nbSamples=nbSamples)
         logger.info('Number of generated events: %d , in %d samples' % (len(events), len(signal)))
         
@@ -162,8 +153,6 @@ if __name__ == "__main__":
     ax.set_xlabel('Samples')
     ax.set_ylabel('Amplitude')
     fig.savefig(os.path.join(cdir, 'signal.eps'), format='eps', dpi=1200)
-    
-    plt.show()
     
     logger.info('All done.')
     

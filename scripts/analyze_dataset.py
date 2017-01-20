@@ -64,6 +64,9 @@ if __name__ == "__main__":
     # Fix seed for random number generation for reproducible results
     np.random.seed(42)
 
+    # NOTE: set so that any numerical error will raise an exception
+    np.seterr(all='raise')
+
     logging.basicConfig(level=logging.INFO)
     cdir = os.path.dirname(os.path.realpath(__file__))
     

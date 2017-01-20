@@ -217,4 +217,5 @@ class TestFunctions(unittest.TestCase):
         self.assertTrue(np.allclose(s, sequence))
                 
 if __name__ == '__main__':
+    np.seterr(all='raise')
     unittest.main()

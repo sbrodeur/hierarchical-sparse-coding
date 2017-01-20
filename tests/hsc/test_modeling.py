@@ -34,8 +34,10 @@ import scipy
 import scipy.sparse
 import numpy as np
 
-from hsc.modeling import ConvolutionalMatchingPursuit, ConvolutionalSparseCoder, ConvolutionalDictionaryLearner, extractRandomWindows, convolve1d, convolve1d_batch, extractWindows, extractWindowsBatch, reconstructSignal, ConvolutionalNMF
+from hsc.modeling import ConvolutionalMatchingPursuit, ConvolutionalSparseCoder, ConvolutionalDictionaryLearner, HierarchicalConvolutionalSparseCoder, HierarchicalConvolutionalMatchingPursuit, \
+                         extractRandomWindows, convolve1d, convolve1d_batch, extractWindows, extractWindowsBatch, reconstructSignal, ConvolutionalNMF, HierarchicalConvolutionalSparseCoder
 from hsc.utils import normalize, overlapAdd
+from hsc.dataset import MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator
 
 class TestConvolutionalNMF(unittest.TestCase):
 
@@ -250,20 +252,14 @@ class TestConvolutionalSparseCoder(unittest.TestCase):
         D = normalize(np.random.random(size=(nbComponents, filterWidth)), axis=1)
         csc = ConvolutionalSparseCoder(D, approximator=cmp)
         
-        sequence = np.zeros((256,), dtype=np.float32)
-        overlapAdd(sequence, D[0], t=32, copy=False)
-        overlapAdd(sequence, D[3], t=48, copy=False)
-        overlapAdd(sequence, 0.5*D[1], t=64, copy=False)
-        overlapAdd(sequence, D[0], t=96, copy=False)
-        overlapAdd(sequence, 0.75*D[2], t=128, copy=False)
-        overlapAdd(sequence, 2.0*D[2], t=192, copy=False)
+        coefficientsRef = scipy.sparse.coo_matrix(([1.0,1.0,0.5,1.0,0.75,2.0], 
+                                                ([32,48,64,96,128,192], [0,3,1,0,2,2])),
+                                               shape = (256,nbComponents))
+        sequence = reconstructSignal(coefficientsRef, D)
         
         coefficients, residual = csc.encode(sequence, nbNonzeroCoefs=8, minCoefficients=1e-6)
-        c = coefficients.tocoo()
-        self.assertTrue(coefficients.nnz == 6)
-        self.assertTrue(np.array_equal(c.row, [32,48,64,96,128,192]))
-        self.assertTrue(np.array_equal(c.col, [0,3,1,0,2,2]))
-        self.assertTrue(np.allclose(c.data, [1.0,1.0,0.5,1.0,0.75,2.0]))
+        self.assertTrue(coefficients.nnz == coefficientsRef.nnz)
+        self.assertTrue(np.allclose(coefficients.toarray(), coefficientsRef.toarray()))
         self.assertTrue(np.allclose(residual, np.zeros_like(residual), atol=1e-6))
             
     def test_reconstruct_1d(self):
@@ -642,7 +638,7 @@ class TestFunctions(unittest.TestCase):
             overlapAdd(sequence, c*D[j], t=i, copy=False)
         coefficients = scipy.sparse.coo_matrix((data, (rows, cols)), shape=(sequence.shape[0], nbComponents))
                                      
-        # Using sparse format                       
+        # Using sparse format
         reconstruction = reconstructSignal(coefficients, D)
         self.assertTrue(np.array_equal(reconstruction.shape, sequence.shape))
         self.assertTrue(np.allclose(reconstruction, sequence))
@@ -652,5 +648,48 @@ class TestFunctions(unittest.TestCase):
         self.assertTrue(np.array_equal(reconstruction.shape, sequence.shape))
         self.assertTrue(np.allclose(reconstruction, sequence))
                 
+class TestHierarchicalConvolutionalMatchingPursuit(unittest.TestCase):
+           
+    def test_computeCoefficients(self):
+        
+        mldg = MultilevelDictionaryGenerator()
+        multilevelDict = mldg.generate(scales=[16,32,64], counts=[16,24,48], decompositionSize=4, multilevelDecomposition=False, maxNbPatternsConsecutiveRejected=10)
+        
+        nbSamples = 4096
+        rates = [1e-3, 1e-3, 1e-3]
+        generator = SignalGenerator(multilevelDict, rates)
+        events = generator.generateEvents(nbSamples, minimumCompressionRatio=0.50)
+        signal = generator.generateSignalFromEvents(events, nbSamples)
+        
+        hcmp = HierarchicalConvolutionalMatchingPursuit()
+        coefficients, residual = hcmp.computeCoefficients(signal, multilevelDict.withSingletonBases(), toleranceSnr=[20,10,10], nbBlocks=1, alpha=0.1, singletonWeight=0.9)
+        self.assertTrue(len(coefficients) == 3)
+        self.assertTrue(np.array_equal(residual.shape, signal.shape))
+        self.assertTrue(np.max(np.abs(residual)) < np.max(np.abs(signal)))
+ 
+class TestHierarchicalConvolutionalSparseCoder(unittest.TestCase):
+ 
+    def test_encode_1d(self):
+        
+        mldg = MultilevelDictionaryGenerator()
+        multilevelDict = mldg.generate(scales=[16,32,64], counts=[16,24,48], decompositionSize=4, multilevelDecomposition=False, maxNbPatternsConsecutiveRejected=10)
+        
+        nbSamples = 4096
+        rates = [1e-3, 1e-3, 1e-3]
+        generator = SignalGenerator(multilevelDict, rates)
+        events = generator.generateEvents(nbSamples, minimumCompressionRatio=0.50)
+        signal = generator.generateSignalFromEvents(events, nbSamples)
+        
+        hcmp = HierarchicalConvolutionalMatchingPursuit()
+        hsc = HierarchicalConvolutionalSparseCoder(multilevelDict, hcmp)
+        coefficients, residual = hsc.encode(signal, toleranceSnr=[20,10,10], nbBlocks=1, alpha=0.1, singletonWeight=0.9)
+        self.assertTrue(len(coefficients) == 3)
+        self.assertTrue(np.array_equal(residual.shape, signal.shape))
+        self.assertTrue(np.max(np.abs(residual)) < np.max(np.abs(signal)))
+        
+        reconstruction = hsc.reconstruct(coefficients)
+        self.assertTrue(np.array_equal(signal.shape, reconstruction.shape))
+        
 if __name__ == '__main__':
+    np.seterr(all='raise')
     unittest.main()

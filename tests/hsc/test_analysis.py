@@ -31,7 +31,7 @@ import os
 import unittest
 import numpy as np
 
-from hsc.dataset import MultilevelDictionary
+from hsc.dataset import MultilevelDictionary, MultilevelDictionaryGenerator
 from hsc.analysis import calculateBitForLevels, calculateInformationRate, calculateMultilevelInformationRates, calculateBitForDatatype
 
 class TestFunctions(unittest.TestCase):
@@ -47,7 +47,8 @@ class TestFunctions(unittest.TestCase):
         self.assertTrue(c_bits == 16)
         
     def test_calculateBitForLevels(self):
-        multilevelDict = MultilevelDictionary(scales=[32,64], counts=[8, 16])
+        mldg = MultilevelDictionaryGenerator()
+        multilevelDict = mldg.generate(scales=[32,64], counts=[8, 16])
         bits = calculateBitForLevels(multilevelDict, dtype=np.float32)
         self.assertTrue(len(bits) == multilevelDict.getNbLevels())
         # First level: 1bit scale + 3 bit index + 32bit value = 36 bits
@@ -62,14 +63,15 @@ class TestFunctions(unittest.TestCase):
         
     def test_calculateInformationRate(self):
         rates = [0.01]
-        multilevelDict = MultilevelDictionary(scales=[32], counts=[8])
+        mldg = MultilevelDictionaryGenerator()
+        multilevelDict = mldg.generate(scales=[32], counts=[8])
         avgInfoRate = calculateInformationRate(multilevelDict, rates)
         self.assertTrue(np.isscalar(avgInfoRate))
         # First level: 0bit scale + 3 bit index + 32bit value = 35 bits
         self.assertTrue(np.allclose(avgInfoRate, 35 * 0.01))
         
         rates = [0.01, 0.02]
-        multilevelDict = MultilevelDictionary(scales=[32,64], counts=[8, 16])
+        multilevelDict = mldg.generate(scales=[32,64], counts=[8, 16])
         avgInfoRate = calculateInformationRate(multilevelDict, rates)
         self.assertTrue(np.isscalar(avgInfoRate))
         # First level: 1bit scale + 3 bit index + 32bit value = 36 bits
@@ -79,7 +81,8 @@ class TestFunctions(unittest.TestCase):
     def test_calculateMultilevelInformationRates(self):
         
         rates = [0.01, 0.02]
-        multilevelDict = MultilevelDictionary(scales=[32,64], counts=[8, 16], decompositionSize=3)
+        mldg = MultilevelDictionaryGenerator()
+        multilevelDict = mldg.generate(scales=[32,64], counts=[8, 16], decompositionSize=3)
         avgInfoRates = calculateMultilevelInformationRates(multilevelDict, rates, dtype=np.float32)
         # First level: 1bit scale + 3 bit index + 32bit value = 36 bits
         # Second level: 1bit scale + 4 bit index + 32bit value = 37 bits
@@ -87,9 +90,10 @@ class TestFunctions(unittest.TestCase):
                                                    36 * 0.01 * 8 + 37 * 0.02 * 16]))
         
         rates = [0.0001, 0.0002, 0.0004, 0.0004]
-        multilevelDict = MultilevelDictionary(scales=[32,64,128,256], counts=[8, 16, 32, 64], decompositionSize=4)
+        multilevelDict = mldg.generate(scales=[32,64,128,256], counts=[8, 16, 32, 64], decompositionSize=4)
         avgInfoRates = calculateMultilevelInformationRates(multilevelDict, rates, dtype=np.float32)
         self.assertTrue(np.array_equal(np.argsort(avgInfoRates), np.arange(len(avgInfoRates))[::-1]))
         
 if __name__ == '__main__':
+    np.seterr(all='raise')
     unittest.main()

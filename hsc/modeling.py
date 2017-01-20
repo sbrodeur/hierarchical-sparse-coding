@@ -29,6 +29,7 @@
 
 import logging
 import itertools
+import collections
 import scipy
 import scipy.signal
 import scipy.sparse
@@ -36,6 +37,7 @@ import numpy as np
 from numpy.lib.stride_tricks import as_strided
 
 from hsc.utils import overlapAdd, overlapReplace, normalize, peek
+from hsc.dataset import MultilevelDictionary
 
 logger = logging.getLogger(__name__)
 
@@ -240,9 +242,9 @@ class ConvolutionalDictionaryLearner(object):
             squeezeOutput = False
  
         if initMethod == 'noise':
-            D = normalize(np.random.uniform(low=np.min(data), high=np.max(data), size=(self.k, self.windowSize, data.shape[-1])), axis=1)
+            D = normalize(np.random.uniform(low=np.min(data), high=np.max(data), size=(self.k, self.windowSize, data.shape[-1])))
         elif initMethod == 'random_samples':
-            D = normalize(extractRandomWindows(data, self.k, self.windowSize), axis=1)
+            D = normalize(extractRandomWindows(data, self.k, self.windowSize))
         else:
             raise Exception('Unsupported initialization method: %s' % (initMethod))
         
@@ -307,7 +309,7 @@ class ConvolutionalDictionaryLearner(object):
             D *= D_updates
             
             # Normalize dictionary
-            D = normalize(D, axis=(1,2))
+            D = normalize(D)
             
             # Calculate additive residual
             coefficientsCentered = np.pad(coefficients[:-filterWidth+1], [(offsetStart,offsetEnd)] + [(0,0) for _ in range(coefficients.ndim-1)], mode='constant')
@@ -525,7 +527,14 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
     def __init__(self):
         pass
 
-    def _doSelection(self, innerProducts, filterWidth, nbBlocks=1, offset=False, nullCoeffThres=0.0):
+    def _doSelection(self, innerProducts, filterWidth, nbBlocks=1, offset=False, nullCoeffThres=0.0, weights=None):
+        
+         # Calculate the score for selection
+        if weights is None:
+            scores = innerProducts
+        else:
+            assert len(weights) == innerProducts.shape[1]
+            scores = innerProducts * weights[np.newaxis,:]
         
         if nbBlocks is None or nbBlocks > 1:
             # Calculate the number of blocks
@@ -533,14 +542,14 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
                 # If the number of blocks was not provided, set it automatically so that block sizes are of 4 times the length of the filters
                 blockSize = 4 * filterWidth
             else:
-                blockSize = int(np.floor(innerProducts.shape[0] / float(nbBlocks)))
+                blockSize = int(np.floor(scores.shape[0] / float(nbBlocks)))
             # Make sure block size is even
             if np.mod(blockSize, 2) == 1:
                 blockSize += 1
-            nbBlocks = int(np.ceil(innerProducts.shape[0] / float(blockSize)))
+            nbBlocks = int(np.ceil(scores.shape[0] / float(blockSize)))
             
             # Calculate padding needed for even-sized blocks
-            basePadEnd = nbBlocks*blockSize - innerProducts.shape[0]
+            basePadEnd = nbBlocks*blockSize - scores.shape[0]
             if offset:
                 # With offset
                 padding = (blockSize/2, basePadEnd + blockSize/2)
@@ -549,41 +558,45 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
                 # No offset
                 padding = (0, basePadEnd)
             
-            # Pad array
-            innerProducts = np.pad(innerProducts, [padding,] + [(0,0) for _ in range(innerProducts.ndim-1)], mode='constant')
-            windows = np.stack(np.split(innerProducts, nbBlocks, axis=0))
+            # Pad and split into multiple windows (blocks)
+            scores = np.pad(scores, [padding,] + [(0,0) for _ in range(scores.ndim-1)], mode='constant')
+            windows = np.stack(np.split(scores, nbBlocks, axis=0))
             
             # Get maximum activation inside each block
             tRel, fIdx = np.unravel_index(np.argmax(np.abs(windows.reshape((windows.shape[0], windows.shape[1]*windows.shape[2]))), axis=1),
                                        dims=(windows.shape[1], windows.shape[2]))
-            t = tRel + np.arange(0, nbBlocks*blockSize, step=blockSize, dtype=np.int)
+            t = tRel - padding[0] + np.arange(0, nbBlocks*blockSize, step=blockSize, dtype=np.int) 
+            assert np.all(t >= 0) and np.all(t < innerProducts.shape[0])
+            
+#             # Remove activations outside the valid range (e.g. because of padding)
+#             indices = np.where((t >= 0) & (t <= innerProducts.shape[0]-1))[0]
+#             nbInvalidRange = len(t) - len(indices)
+#             t = t[indices]
+#             fIdx = fIdx[indices]
+#             logger.debug('Number of activations with invalid range removed during selection: %d' % (nbInvalidRange))
+            
+            # Remove activations that have null coefficients (e.g. because of padding)
+            coefficients = innerProducts[t, fIdx]
+            nullMask = np.where(np.abs(coefficients) > nullCoeffThres)
+            t, fIdx, coefficients = t[nullMask], fIdx[nullMask], coefficients[nullMask]
             
             # Remove activations that would cause interference (too close across block boundaries), always keep the first activation
             tDiff = t[1:] - t[:-1]
             indices = np.where(tDiff >= filterWidth)[0]
             indices = np.concatenate(([0], indices + 1))
             nbInterferences = len(t) - len(indices)
-            t = t[indices]
-            fIdx = fIdx[indices]
+            t, fIdx, coefficients = t[indices], fIdx[indices], coefficients[indices]
             logger.debug('Number of interfering activations removed during selection: %d' % (nbInterferences))
                 
-            # Remove activations that have null coefficients (e.g. because of padding)
-            coefficients = innerProducts[t, fIdx]
-            nullMask = np.where(np.abs(coefficients) > nullCoeffThres)
-            t, fIdx, coefficients = t[nullMask], fIdx[nullMask], coefficients[nullMask]
-            
             # Sort activations by absolute amplitude of coefficients
             indices = np.argsort(np.abs(coefficients))[::-1]
             nbNulls = len(t) - len(indices)
             t, fIdx = t[indices], fIdx[indices]
-            if offset:
-                # Remove offset constant
-                t -= blockSize/2
             logger.debug('Number of null activations removed during selection: %d' % (nbNulls))
         
         else:
             # Find maximum across the whole activations
-            t, fIdx = np.unravel_index(np.argmax(np.abs(innerProducts)), innerProducts.shape)
+            t, fIdx = np.unravel_index(np.argmax(np.abs(scores)), scores.shape)
             t = np.stack((t,))
             fIdx = np.stack((fIdx,))
         
@@ -592,7 +605,19 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         
         return t, fIdx
         
-    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, verbose=False):
+    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, weights=None):
+        assert sequence.ndim == 1 or sequence.ndim == 2
+        assert D.ndim == 2 or D.ndim == 3
+
+        if sequence.ndim == 1:
+            squeezeOutput = True
+            sequence = sequence[:,np.newaxis]
+        else:
+            squeezeOutput = False
+            
+        if D.ndim == 2:
+            squeezeOutput = True
+            D = D[:,:,np.newaxis]
 
         # Initialize the residual and sparse coefficients
         energySignal = np.sum(np.square(sequence))
@@ -617,7 +642,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             nullCoeffThres = alpha * np.max(np.abs(innerProducts))
             if minCoefficients is not None:
                 nullCoeffThres = min(minCoefficients, nullCoeffThres)
-            tIndices, fIndices = self._doSelection(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=nullCoeffThres)
+            tIndices, fIndices = self._doSelection(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=nullCoeffThres, weights=weights)
             for t, fIdx in zip(tIndices, fIndices):
         
                 # Find the maximum activation over the whole sequence and filters
@@ -625,8 +650,10 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
     
                 # Update the sparse coefficients
                 if np.abs(coefficients[t, fIdx]) > 0.0:
+                    # Count duplicate coefficients if already existing
                     nbDuplicates += 1
-                else:
+                elif np.abs(coefficient) > 0.0:
+                    # Count non-zero coefficients
                     nnz += 1
                 coefficients[t, fIdx] += coefficient
     
@@ -666,7 +693,12 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
                 overlapReplace(innerProducts, localInnerProducts, t, copy=False)
                 
                 # Print information about current iteration
-                snr = 10.0*np.log10(energySignal/energyResidual)
+                if energyResidual == 0.0:
+                    # Avoid numerical errors by setting to infinity
+                    snr = np.inf
+                else:
+                    snr = 10.0*np.log10(energySignal/energyResidual)
+                        
                 logger.debug('Matching pursuit iteration %d: event is (t = %d, f = %d, c = %f), snr = %f dB' % (nbIterations, t, fIdx, coefficient, snr))
                 nbIterations += 1
                 
@@ -694,7 +726,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
 
             # Toggle offset switch
             offset = not offset
-
+            
             # Print information
             logger.info('SNR of %f dB achieved after %d selection iterations' % (snr, nbSelections))
             logger.info('Number of selection: %d' % (len(tIndices)))
@@ -709,8 +741,113 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             clippedCoefficients[cx.row[nullMask],  cx.col[nullMask]] = cx.data[nullMask]
             coefficients = clippedCoefficients
 
+        # Convert to compressed-column sparse matrix format
+        coefficients = coefficients.tocsc()
+
+        if squeezeOutput:
+            residual = np.squeeze(residual, axis=1)
+
         return coefficients, residual
 
+class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
+
+    def __init__(self):
+        pass
+
+    def _forwardPhase(self, sequence, multilevelDict, toleranceSnr=None, nbBlocks=1, alpha=0.5, singletonWeight=0.5):
+        
+        # Loop over all levels
+        coefficients = []
+        input = sequence
+        nbSingletons = 0
+        for level in range(multilevelDict.getNbLevels()):
+        
+            if toleranceSnr is not None and isinstance(toleranceSnr, collections.Iterable):
+                targetSnr = toleranceSnr[level]
+            else:
+                targetSnr = toleranceSnr
+        
+            # Get dictionary at current level
+            D = multilevelDict.getRawDictionary(level)
+        
+            # Calculate the weights (reduce the score of the singletons)
+            weights = np.ones((D.shape[0],), dtype=D.dtype)
+            weights[:nbSingletons] = singletonWeight
+        
+            # Instanciate a new coder for current level and encode
+            cmp = ConvolutionalMatchingPursuit()
+            levelCoder = ConvolutionalSparseCoder(D, cmp)
+            levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)
+            
+            input = levelCoefficients.todense()
+            coefficients.append(levelCoefficients)
+            nbSingletons += D.shape[0]
+        
+        return coefficients
+
+    def _backwardPhase(self, coefficients, multilevelDict):
+        
+        lastLevelCoefficients = coefficients[-1].copy()
+        if scipy.sparse.issparse(lastLevelCoefficients):
+            # NOTE: convert to compressed-column format for efficient slicing and addition
+            lastLevelCoefficients = lastLevelCoefficients.tocsc()
+        
+        # Loop over all levels
+        newCoefficients = []
+        for level in range(multilevelDict.getNbLevels()):
+            
+            if level < multilevelDict.getNbLevels() - 1:
+                levelCoefficients = coefficients[level]
+                nbFeatures = levelCoefficients.shape[1]
+                
+                if scipy.sparse.issparse(levelCoefficients):
+                    
+                    # Extract the related singleton coefficients from the last layer, then set to zero
+                    levelCoefficients = lastLevelCoefficients[:, :nbFeatures]
+                    lastLevelCoefficients = scipy.sparse.hstack((scipy.sparse.csc_matrix((lastLevelCoefficients.shape[0], nbFeatures), dtype=lastLevelCoefficients.dtype),
+                                                                 lastLevelCoefficients[:, nbFeatures:]))
+                    
+                    # Remove any zero entries in the sparse matrix
+                    levelCoefficients.eliminate_zeros()
+                else:
+                    # Extract the related singleton coefficients from the last layer, then set to zero
+                    levelCoefficients = lastLevelCoefficients[:, :nbFeatures]
+                    lastLevelCoefficients[:, :nbFeaturesLevel] = 0.0
+            else:
+                # Last layer
+                levelCoefficients = lastLevelCoefficients
+            
+            newCoefficients.append(levelCoefficients)
+        
+        # NOTE: the total number of coefficients should not change compared to the last layer
+        assert np.sum([c.nnz for c in newCoefficients]) == coefficients[-1].nnz
+            
+        return newCoefficients
+
+    def computeCoefficients(self, sequence, multilevelDict, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, singletonWeight=0.5):
+        assert isinstance(multilevelDict, MultilevelDictionary)
+        
+        # Encode signal bottom-up through all layers
+        coefficients = self._forwardPhase(sequence, multilevelDict, toleranceSnr, nbBlocks, alpha, singletonWeight)
+        
+        # Remove redundancy across layers
+        coefficients = self._backwardPhase(coefficients, multilevelDict)
+        
+        # Get the number of features at input level
+        baseDict = multilevelDict.getBaseDictionary()
+        if baseDict.ndim == 2:
+            reconstruction = np.zeros((coefficients[0].shape[0],), dtype=coefficients[0].dtype)
+        else:
+            reconstruction = np.zeros((coefficients[0].shape[0], baseDict.shape[-1]), dtype=coefficients[0].dtype)
+            
+        # Calculate residual based on the reconstruction
+        representations = multilevelDict.getMultiscaleDictionaries()
+        for level in range(multilevelDict.getNbLevels()):
+            reconstruction += reconstructSignal(coefficients[level], representations[level])
+        residual = sequence - reconstruction
+        
+        return coefficients, residual
+    
 class ConvolutionalSparseCoder(object):
  
     def __init__(self, D, approximator):
@@ -726,3 +863,30 @@ class ConvolutionalSparseCoder(object):
         assert coefficients.ndim == 1 or coefficients.ndim == 2
         return reconstructSignal(coefficients, self.D)
     
+class HierarchicalConvolutionalSparseCoder(object):
+
+    def __init__(self, multilevelDict, approximator):
+        assert isinstance(multilevelDict, MultilevelDictionary)
+        self.multilevelDict = multilevelDict.withSingletonBases()
+        self.approximator = approximator
+ 
+    def encode(self, X, *args, **kwargs):
+        assert X.ndim == 1 or X.ndim == 2
+        return self.approximator.computeCoefficients(X, self.multilevelDict, *args, **kwargs)
+ 
+    def reconstruct(self, coefficients):
+        assert len(coefficients) > 0
+        
+        # Get the number of features at input level
+        baseDict = self.multilevelDict.getBaseDictionary()
+        if baseDict.ndim == 2:
+            signal = np.zeros((coefficients[0].shape[0],), dtype=coefficients[0].dtype)
+        else:
+            signal = np.zeros((coefficients[0].shape[0], baseDict.shape[-1]), dtype=coefficients[0].dtype)
+            
+        # Calculate residual based on the reconstruction
+        representations = self.multilevelDict.getMultiscaleDictionaries()
+        for level in range(self.multilevelDict.getNbLevels()):
+            signal += reconstructSignal(coefficients[level], representations[level])
+        
+        return signal
