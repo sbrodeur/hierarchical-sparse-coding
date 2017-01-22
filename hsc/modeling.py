@@ -219,17 +219,40 @@ def reconstructSignal(coefficients, D):
 
 class ConvolutionalDictionaryLearner(object):
  
-    def __init__(self, k, windowSize, algorithm='kmean'):
+    def __init__(self, k, windowSize, algorithm='kmean', avoidSingletons=False):
         self.k = k
         self.windowSize = windowSize
         self.algorithm = algorithm
+        self.avoidSingletons = avoidSingletons
  
     def _train_samples(self, data):
-        # Extract windows from the data of the same size as the dictionary
-        windows = extractRandomWindows(data, self.k, self.windowSize)
- 
+        
+        # Loop until all the required number of non-null patterns is found
+        patterns = []
+        nbPatternsFound = 0
+        while nbPatternsFound < self.k:
+        
+            # Extract windows from the data of the same size as the dictionary
+            windows = extractRandomWindows(data, self.k, self.windowSize)
+     
+            # Check if windows contain patterns that have non-zero norms
+            l2norms = np.sqrt(np.sum(np.square(windows), axis=tuple(range(1, windows.ndim))))
+            if self.avoidSingletons:
+                l0norms = np.sum(windows != 0.0, axis=tuple(range(1, windows.ndim)))
+                validWindows = windows[np.where((l2norms > 0.0) & (l0norms > 1))]
+            else:
+                validWindows = windows[np.where(l2norms > 0.0)]
+            for validWindow in validWindows:
+                patterns.append(validWindow)
+                nbPatternsFound += 1
+                if nbPatternsFound == self.k:
+                    break
+                
+        patterns = np.stack(patterns)
+                
         # Normalize the dictionary elements to have unit norms
-        D = normalize(windows)
+        D = normalize(patterns)
+            
         return D
  
     def _init_D(self, data, initMethod='random_samples'):
@@ -565,15 +588,13 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             # Get maximum activation inside each block
             tRel, fIdx = np.unravel_index(np.argmax(np.abs(windows.reshape((windows.shape[0], windows.shape[1]*windows.shape[2]))), axis=1),
                                        dims=(windows.shape[1], windows.shape[2]))
-            t = tRel - padding[0] + np.arange(0, nbBlocks*blockSize, step=blockSize, dtype=np.int) 
-            assert np.all(t >= 0) and np.all(t < innerProducts.shape[0])
+            t = tRel + np.arange(0, nbBlocks*blockSize, step=blockSize, dtype=np.int) - padding[0]
             
-#             # Remove activations outside the valid range (e.g. because of padding)
-#             indices = np.where((t >= 0) & (t <= innerProducts.shape[0]-1))[0]
-#             nbInvalidRange = len(t) - len(indices)
-#             t = t[indices]
-#             fIdx = fIdx[indices]
-#             logger.debug('Number of activations with invalid range removed during selection: %d' % (nbInvalidRange))
+            # Remove activations outside the valid range (e.g. because of padding)
+            indices = np.where((t >= 0) & (t <= innerProducts.shape[0]-1))[0]
+            nbInvalidRange = len(t) - len(indices)
+            t, fIdx = t[indices], fIdx[indices]
+            logger.debug('Number of activations with invalid range removed during selection: %d' % (nbInvalidRange))
             
             # Remove activations that have null coefficients (e.g. because of padding)
             coefficients = innerProducts[t, fIdx]
@@ -824,14 +845,30 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
             
         return newCoefficients
 
-    def computeCoefficients(self, sequence, multilevelDict, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, singletonWeight=0.5):
+    def computeCoefficients(self, sequence, multilevelDict, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, singletonWeight=0.5, returnDistributed=True):
         assert isinstance(multilevelDict, MultilevelDictionary)
         
         # Encode signal bottom-up through all layers
         coefficients = self._forwardPhase(sequence, multilevelDict, toleranceSnr, nbBlocks, alpha, singletonWeight)
-        
+
         # Remove redundancy across layers
-        coefficients = self._backwardPhase(coefficients, multilevelDict)
+        if returnDistributed:
+            coefficients = self._backwardPhase(coefficients, multilevelDict)
+        else:
+             # Loop over all levels
+            newCoefficients = []
+            for level in range(multilevelDict.getNbLevels()):
+                levelCoefficients = coefficients[level]
+                
+                # Keep last-level only
+                if level < multilevelDict.getNbLevels() - 1:
+                    if scipy.sparse.issparse(levelCoefficients):
+                        levelCoefficients = scipy.sparse.csr_matrix(levelCoefficients.shape, dtype=levelCoefficients.dtype)
+                    else:
+                        levelCoefficients = np.zeros_like(levelCoefficients)
+                
+                newCoefficients.append(levelCoefficients)
+            coefficients = newCoefficients
         
         # Get the number of features at input level
         baseDict = multilevelDict.getBaseDictionary()
@@ -867,7 +904,11 @@ class HierarchicalConvolutionalSparseCoder(object):
 
     def __init__(self, multilevelDict, approximator):
         assert isinstance(multilevelDict, MultilevelDictionary)
-        self.multilevelDict = multilevelDict.withSingletonBases()
+        
+        if not multilevelDict.hasSingletonBases:
+            multilevelDict = multilevelDict.withSingletonBases()
+        
+        self.multilevelDict = multilevelDict
         self.approximator = approximator
  
     def encode(self, X, *args, **kwargs):

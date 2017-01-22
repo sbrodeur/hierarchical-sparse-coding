@@ -36,7 +36,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 
-from hsc.dataset import Perlin, MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator
+from hsc.dataset import Perlin, MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator, scalesToWindowSizes
 
 class TestPerlin(unittest.TestCase):
 
@@ -94,6 +94,8 @@ class TestMultilevelDictionary(unittest.TestCase):
                 (selectedLevels, selectedIndices, positions, coefficients) in zip(decompositionRef, decomposition):
                 self.assertTrue(np.allclose(np.sort(selectedLevelsRef), np.sort(selectedLevels)))
                 self.assertTrue(np.allclose(np.sort(selectedIndicesRef), np.sort(selectedIndices)))
+                if not np.allclose(np.sort(positionsRef), np.sort(positions)):
+                    pass
                 self.assertTrue(np.allclose(np.sort(positionsRef), np.sort(positions)))
                 self.assertTrue(np.allclose(np.sort(coefficientsRef), np.sort(coefficients)))
         for i in range(multilevelDict.getNbLevels()):
@@ -320,6 +322,30 @@ class TestSignalGenerator(unittest.TestCase):
         signal = generator.generateSignalFromEvents(events)
         self.assertTrue(np.allclose(len(signal), nbSamples, rtol=0.1))
           
+class TestFunctions(unittest.TestCase):
+    
+    def test_scalesToWindowSizes(self):
+        scales = [3,5,9]
+        widths = scalesToWindowSizes(scales)
+        self.assertTrue(len(widths) == len(scales))
+        self.assertTrue(np.array_equal(widths, [3,3,5]))
+        
+        scales = [4,6,8]
+        widths = scalesToWindowSizes(scales)
+        self.assertTrue(len(widths) == len(scales))
+        self.assertTrue(np.array_equal(widths, [4,3,3]))
+          
+        scales = [3,6,7]
+        widths = scalesToWindowSizes(scales)
+        self.assertTrue(len(widths) == len(scales))
+        self.assertTrue(np.array_equal(widths, [3,4,2]))
+        
+        scales = [2,9,11]
+        widths = scalesToWindowSizes(scales)
+        self.assertTrue(len(widths) == len(scales))
+        self.assertTrue(np.array_equal(widths, [2,8,3]))
+        
+        
 if __name__ == '__main__':
     np.seterr(all='raise')
     unittest.main()

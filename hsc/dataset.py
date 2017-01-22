@@ -107,7 +107,7 @@ class MultilevelDecompositionException(Exception):
 
 class MultilevelDictionary(object):
     
-    def __init__(self, dictionaries, scales, representations, decompositions):
+    def __init__(self, dictionaries, scales, representations, decompositions, hasSingletonBases=False):
         assert len(dictionaries) > 0
         assert len(scales) > 0
         
@@ -115,6 +115,7 @@ class MultilevelDictionary(object):
         self.scales = scales
         self.representations = representations
         self.decompositions = decompositions
+        self.hasSingletonBases = hasSingletonBases
         
         if decompositions is not None:
             self.counts = np.array( [dictionaries[0].shape[0]] + [len(decomposition) for decomposition in decompositions], np.int)
@@ -122,7 +123,7 @@ class MultilevelDictionary(object):
             self.counts = np.array([dictionary.shape[0] for dictionary in dictionaries], dtype=np.int)
 
     @classmethod
-    def fromRawDictionaries(cls, dictionaries, scales):
+    def fromRawDictionaries(cls, dictionaries, scales, hasSingletonBases=False):
         assert len(dictionaries) > 0
         assert len(scales) > 0
         
@@ -130,7 +131,9 @@ class MultilevelDictionary(object):
         # Loop for all levels
         decompositions = []
         representations = [dictionaries[0],]
+        widths = scalesToWindowSizes(scales)
         for level, dictionary in enumerate(dictionaries):
+            assert dictionary.shape[1] == widths[level]
             if level == 0:
                 continue
             
@@ -142,8 +145,19 @@ class MultilevelDictionary(object):
                 if len(nnzMask[0]) > 0:
                     coefficients = pattern[nnzMask]
                     positions, selectedIndices = nnzMask[0], nnzMask[1]
+                    
+                    # Convert level-relative positions to input-level positions
+                    if np.mod(scales[level-1], 2) == 0:
+                        # Even
+                        offset = scales[level-1]/2-1
+                    else:
+                        # Odd
+                        offset = scales[level-1]/2
+                    positions += offset
+                    
                     selectedLevels = (level-1) * np.ones_like(positions, dtype=np.int32)
                     levelDecompositions.append([selectedLevels, selectedIndices, positions, coefficients])
+                    assert len(coefficients) > 0
                     
                     # Compose each pattern linearly
                     signal = np.zeros(scales[level], dtype=dictionary.dtype)
@@ -152,7 +166,9 @@ class MultilevelDictionary(object):
                         overlapAdd(signal, element=c*representations[l][i,:], t=t, copy=False)
                             
                     # Normalize l2-norm
-                    signal /= np.sqrt(np.sum(np.square(signal)))
+                    l2norm = np.sqrt(np.sum(np.square(signal)))
+                    assert l2norm > 0.0
+                    signal /= l2norm
                     
                     levelRepresentations.append(signal)
                 else:
@@ -163,7 +179,7 @@ class MultilevelDictionary(object):
             decompositions.append(levelDecompositions)
             representations.append(np.stack(levelRepresentations))
         
-        return MultilevelDictionary(dictionaries, scales, representations, decompositions)
+        return cls(dictionaries, scales, representations, decompositions, hasSingletonBases)
 
     @classmethod
     def fromBaseDictionary(cls, baseDict):
@@ -174,7 +190,7 @@ class MultilevelDictionary(object):
                    decompositions=None)
 
     @classmethod
-    def fromDecompositions(cls, baseDict, decompositions, scales):
+    def fromDecompositions(cls, baseDict, decompositions, scales, hasSingletonBases=False):
         assert decompositions is not None and len(decompositions) > 0
         assert len(scales) > 0
         
@@ -182,6 +198,7 @@ class MultilevelDictionary(object):
         # Loop over all higher levels
         logger.debug('Precomputing raw dictionaries from base dictionary and decompositions...')
         dictionaries = [baseDict,]
+        widths = scalesToWindowSizes(scales)
         try:
             counts = np.array( [dictionaries[0].shape[0]] + [len(decomposition) for decomposition in decompositions], np.int)
             for level in range(1, len(scales)):
@@ -191,10 +208,19 @@ class MultilevelDictionary(object):
                 for selectedLevels, selectedIndices, positions, coefficients in decompositions[level-1]:
                     
                     # Compose each pattern
-                    basis = np.zeros((scales[level], counts[level-1]), dtype=coefficients.dtype)
+                    basis = np.zeros((widths[level], counts[level-1]), dtype=coefficients.dtype)
                     if not np.array_equal(selectedLevels, (level-1) * np.ones_like(selectedLevels)):
+                        # TODO: this would be possible with the singleton representation
                         raise MultilevelDecompositionException('Can only convert to dense level dictionaries when the decomposition is on the previous level only.')
-                    basis[positions, selectedIndices] = coefficients
+                    
+                    # Convert input-level positions to level-relative positions
+                    if np.mod(scales[level-1], 2) == 0:
+                        # Even
+                        offset = scales[level-1]/2-1
+                    else:
+                        # Odd
+                        offset = scales[level-1]/2
+                    basis[positions - offset, selectedIndices] = coefficients
                     
                     # Normalize
                     basis /= np.sqrt(np.sum(np.square(basis)))
@@ -228,59 +254,38 @@ class MultilevelDictionary(object):
                 
             representations.append(np.stack(levelRepresentations))
         
-        return cls(dictionaries, scales, representations, decompositions)
+        return cls(dictionaries, scales, representations, decompositions, hasSingletonBases)
 
     def withSingletonBases(self):
         
-        if self.getNbLevels() > 1:
-            
-            # Loop over all higher levels
-            newDictionaries = [self.dictionaries[0], ]
-            newCounts = [self.counts[0],]
-            for level in range(1, self.getNbLevels()):
-                D = self.dictionaries[level]
-                
-                if level > 1:
-                    # Expand dictionary on the feature axis to cover extra singleton at previous level
-                    nbInputFeatures = newDictionaries[level-1].shape[0]
-                    D = np.pad(D, [(0,0),(0,0),(nbInputFeatures - D.shape[-1],0)], mode='constant')
-                assert D.shape[-1] == newDictionaries[level-1].shape[0]
-                
-                # Expand dictionary with extra singleton bases
-                nbSingletons = newCounts[level-1]
-                singletons = np.zeros((nbSingletons,) + D.shape[1:], D.dtype)
-                indices = np.arange(nbSingletons)
-                
-                # NOTE: the singleton is already normalized
-                filterWidth = D.shape[1]
-                if np.mod(filterWidth, 2) == 0:
-                    # Even size
-                    offset = filterWidth/2-1
-                else:
-                    # Odd size
-                    offset = filterWidth/2
-                singletons[indices, offset, indices] = 1.0
-                
-                newD = np.concatenate((singletons, D), axis=0)
-                newDictionaries.append(newD)
-                newCounts.append(newD.shape[0])
-            
-            # Create a new instance with expanded dictionaries
-            instance = MultilevelDictionary.fromRawDictionaries(newDictionaries, self.scales)
-            
+        if not self.hasSingletonBases:
+            if self.getNbLevels() > 1:
+                # Create a new instance with expanded dictionaries
+                newDictionaries = addSingletonBases(self.dictionaries)
+                instance = MultilevelDictionary.fromRawDictionaries(newDictionaries, self.scales, hasSingletonBases=True)
+            else:
+                logger.warn('Could not add expanded bases since there is only one level')
+                instance = self
         else:
-            logger.warn('Could not add expanded bases since there is only one level')
+            logger.warn('Could not add expanded bases since they already exist')
             instance = self
 
         return instance
 
     def visualize(self, maxCounts=None):
         figs = []
-        for level, count in enumerate(self.counts):
+        for level in range(self.getNbLevels()):
             fig = plt.figure(figsize=(8,8), facecolor='white', frameon=True)
             fig.canvas.set_window_title('Level %d dictionary' % (level))
             fig.subplots_adjust(left=0.05, right=0.95, bottom=0.05, top=0.95,
                                 hspace=0.01, wspace=0.01)
+            
+            levelRepresentations = self.representations[level]
+            if self.hasSingletonBases:
+                # Filter out representations of singletons
+                l0norms = np.sum(self.dictionaries[level] != 0.0, axis=tuple(range(1, self.dictionaries[level].ndim)))
+                levelRepresentations = levelRepresentations[np.where(l0norms > 1)]
+            count = levelRepresentations.shape[0]
             
             if maxCounts is not None:
                 if isinstance(maxCounts, collections.Iterable):
@@ -290,13 +295,14 @@ class MultilevelDictionary(object):
                 
             m,n = findGridSize(count)
             
-            dict = self.representations[level][:count]
+            indices = np.random.permutation(np.arange(levelRepresentations.shape[0], dtype=np.int))
+            indices = indices[:count]
             idx = 0
             for i in range(m):
                 for j in range(n):
                     ax = fig.add_subplot(m,n,idx+1)
-                    ax.plot(dict[idx], linewidth=2, color='k')
-                    r = np.max(np.abs(dict[idx]))
+                    ax.plot(levelRepresentations[indices[idx]], linewidth=2, color='k')
+                    r = np.max(np.abs(levelRepresentations[indices[idx]]))
                     ax.set_ylim(-r, r)
                     ax.set_axis_off()
                     idx += 1
@@ -689,3 +695,48 @@ class SignalGenerator(object):
             times = np.unique(np.floor(times).astype(np.int))
         
         return times
+    
+def addSingletonBases(dictionaries):
+    assert len(dictionaries) > 1
+    
+    # Loop over all higher levels
+    newDictionaries = [dictionaries[0], ]
+    newCounts = [dictionaries[0].shape[0],]
+    for level in range(1, len(dictionaries)):
+        D = dictionaries[level]
+        
+        if level > 1:
+            # Expand dictionary on the feature axis to cover extra singleton at previous level
+            nbInputFeatures = newDictionaries[level-1].shape[0]
+            D = np.pad(D, [(0,0),(0,0),(nbInputFeatures - D.shape[-1],0)], mode='constant')
+        assert D.shape[-1] == newDictionaries[level-1].shape[0]
+        
+        # Expand dictionary with extra singleton bases
+        nbSingletons = newCounts[level-1]
+        singletons = np.zeros((nbSingletons,) + D.shape[1:], D.dtype)
+        indices = np.arange(nbSingletons)
+        
+        # NOTE: the singleton is already normalized
+        filterWidth = D.shape[1]
+        if np.mod(filterWidth, 2) == 0:
+            # Even size
+            offset = filterWidth/2-1
+        else:
+            # Odd size
+            offset = filterWidth/2
+        singletons[indices, offset, indices] = 1.0
+        
+        newD = np.concatenate((singletons, D), axis=0)
+        newDictionaries.append(newD)
+        newCounts.append(newD.shape[0])
+
+    return newDictionaries
+    
+def scalesToWindowSizes(scales):
+    assert len(scales) > 0
+    
+    windowSizes = [scales[0],]
+    for level in range(1,len(scales)):
+        width = int(scales[level] - scales[level-1] + 1)
+        windowSizes.append(width)
+    return np.array(windowSizes, dtype=np.int)
