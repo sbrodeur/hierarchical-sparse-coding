@@ -604,10 +604,11 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             # Remove activations that would cause interference (too close across block boundaries), always keep the first activation
             tDiff = t[1:] - t[:-1]
             indices = np.where(tDiff >= filterWidth)[0]
-            indices = np.concatenate(([0], indices + 1))
-            nbInterferences = len(t) - len(indices)
-            t, fIdx, coefficients = t[indices], fIdx[indices], coefficients[indices]
-            logger.debug('Number of interfering activations removed during selection: %d' % (nbInterferences))
+            if len(indices) > 0:
+                indices = np.concatenate(([0], indices + 1))
+                nbInterferences = len(t) - len(indices)
+                t, fIdx, coefficients = t[indices], fIdx[indices], coefficients[indices]
+                logger.debug('Number of interfering activations removed during selection: %d' % (nbInterferences))
                 
             # Sort activations by absolute amplitude of coefficients
             indices = np.argsort(np.abs(coefficients))[::-1]
@@ -764,6 +765,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
 
         # Convert to compressed-column sparse matrix format
         coefficients = coefficients.tocsc()
+        coefficients.eliminate_zeros()
 
         if squeezeOutput:
             residual = np.squeeze(residual, axis=1)
@@ -780,7 +782,6 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
         # Loop over all levels
         coefficients = []
         input = sequence
-        nbSingletons = 0
         for level in range(multilevelDict.getNbLevels()):
         
             if toleranceSnr is not None and isinstance(toleranceSnr, collections.Iterable):
@@ -792,6 +793,7 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
             D = multilevelDict.getRawDictionary(level)
         
             # Calculate the weights (reduce the score of the singletons)
+            nbSingletons = D.shape[0] - multilevelDict.countsNoSingletons[level]
             weights = np.ones((D.shape[0],), dtype=D.dtype)
             weights[:nbSingletons] = singletonWeight
         
@@ -802,7 +804,6 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
             
             input = levelCoefficients.todense()
             coefficients.append(levelCoefficients)
-            nbSingletons += D.shape[0]
         
         return coefficients
 

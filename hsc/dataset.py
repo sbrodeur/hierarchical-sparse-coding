@@ -122,6 +122,16 @@ class MultilevelDictionary(object):
         else:
             self.counts = np.array([dictionary.shape[0] for dictionary in dictionaries], dtype=np.int)
 
+        if self.hasSingletonBases:
+            countsNoSingletons = [self.counts[0],]
+            for level in range(1, len(self.counts)):
+                nbSingletonsLevel = np.sum(countsNoSingletons)
+                nbStandardFeaturesLevel = self.counts[level] - nbSingletonsLevel
+                countsNoSingletons.append(nbStandardFeaturesLevel)
+            self.countsNoSingletons = np.array(countsNoSingletons, dtype=np.int)
+        else:
+            self.countsNoSingletons = np.copy(self.counts)
+
     @classmethod
     def fromRawDictionaries(cls, dictionaries, scales, hasSingletonBases=False):
         assert len(dictionaries) > 0
@@ -352,7 +362,7 @@ class MultilevelDictionaryGenerator(object):
     def __init__(self):
         pass
 
-    def generate(self, scales, counts, decompositionSize=4, positionSampling='random', multilevelDecomposition=True, maxNbPatternsConsecutiveRejected=100):
+    def generate(self, scales, counts, decompositionSize=4, positionSampling='random', multilevelDecomposition=True, maxNbPatternsConsecutiveRejected=100, nonNegativity=False):
         assert len(scales) > 0
         assert len(counts) > 0
         assert len(scales) == len(counts)
@@ -362,7 +372,7 @@ class MultilevelDictionaryGenerator(object):
         
         # Base-level dictionary
         logger.debug('Generating base dictionary...')
-        baseDict = self._generateBaseDictionary(counts[0], scales[0], maxNbPatternsConsecutiveRejected)
+        baseDict = self._generateBaseDictionary(counts[0], scales[0], maxNbPatternsConsecutiveRejected, nonNegativity)
         
         # High-level dictionaries
         logger.debug('Generating high-level dictionaries...')
@@ -374,7 +384,7 @@ class MultilevelDictionaryGenerator(object):
             
         return multilevelDict 
             
-    def _generateBaseDictionary(self, nbPatterns, nbPoints, maxNbPatternsConsecutiveRejected=100):
+    def _generateBaseDictionary(self, nbPatterns, nbPoints, maxNbPatternsConsecutiveRejected=100, nonNegativity=False):
         assert nbPatterns > 0
         assert nbPoints > 0
         assert maxNbPatternsConsecutiveRejected > 0
@@ -409,6 +419,10 @@ class MultilevelDictionaryGenerator(object):
             perlin.shuffle()
             y = perlin.sample(x, octaves)
             nbPatternsSampled += 1
+            
+            # Non-negativity constraint
+            if nonNegativity:
+                y = np.abs(y)
             
             # Hanning windowing to make patterns localized in time and avoid discontinuties at endpoints
             window = np.hanning(nbPoints)
@@ -604,7 +618,7 @@ class SignalGenerator(object):
                 factorIdx += 1
                 if factorIdx >= len(factors):
                     raise Exception("Unable to find the optimal rates: initial rates are too high")
-                logger.debug('Rates are too high (bitrate of %f bit/sample at first level): scaling so that maximum rate across levels is %f' % (avgInfoRates[0], np.max(self.rates)))
+                logger.debug('Rates are too high (bitrate of %f bit/sample at first level): scaling so that maximum rate across levels is %f' % (avgInfoRates[0], np.max(scaledRates)))
         logger.info('Optimal rate scale found: %4.8f (for bitrate of %f bit/sample at first level)' % (np.max(scaledRates), avgInfoRates[0]))
         
         return scaledRates
