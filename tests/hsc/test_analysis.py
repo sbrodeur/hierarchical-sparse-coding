@@ -30,9 +30,11 @@
 import os
 import unittest
 import numpy as np
+import scipy
+import scipy.sparse
 
 from hsc.dataset import MultilevelDictionary, MultilevelDictionaryGenerator
-from hsc.analysis import calculateBitForLevels, calculateInformationRate, calculateMultilevelInformationRates, calculateBitForDatatype
+from hsc.analysis import calculateBitForLevels, calculateInformationRate, calculateMultilevelInformationRates, calculateBitForDatatype, visualizeDistributionRatios, calculateDistributionRatios, visualizeInformationRates, visualizeEnergies, visualizeInformationRatesOptimality
 
 class TestFunctions(unittest.TestCase):
 
@@ -93,6 +95,61 @@ class TestFunctions(unittest.TestCase):
         multilevelDict = mldg.generate(scales=[32,64,128,256], counts=[8, 16, 32, 64], decompositionSize=4)
         avgInfoRates = calculateMultilevelInformationRates(multilevelDict, rates, dtype=np.float32)
         self.assertTrue(np.array_equal(np.argsort(avgInfoRates), np.arange(len(avgInfoRates))[::-1]))
+        
+    def test_calculateDistributionRatios(self):
+        
+        indices = [10,20,30,40,50,90]
+        filters = [0,1,1,5,6,7]
+        l0 = scipy.sparse.lil_matrix((100,8))
+        l0[indices, filters] = np.random.random(len(indices))
+        
+        indices = [15,25,30,75]
+        filters = [1,5,8,15]
+        l1 = scipy.sparse.lil_matrix((100,16))
+        l1[indices, filters] = np.random.random(len(indices))
+        
+        coefficients = [l0.tocsr(), l1.tocsr()]
+        distribution = calculateDistributionRatios(coefficients)
+        self.assertTrue(np.allclose(distribution, [0.6, 0.4]))
+        
+    def test_visualizeDistributionRatios(self):
+        weights = np.array([0.1, 0.5, 0.75, 1.0, 5.0])
+        distributions = np.array([[0.8,0.1,0.1],
+                                  [0.8,0.15,0.05],
+                                  [0.7,0.2,0.1],
+                                  [0.6,0.3,0.1],
+                                  [0.5,0.3,0.2]])
+        fig = visualizeDistributionRatios(weights, distributions)
+        self.assertTrue(fig is not None)
+    
+    def test_visualizeInformationRates(self):
+        weights = np.array([0.1, 0.5, 0.75, 1.0, 5.0])
+        sparseInfoRates = np.array([15.0, 12.5, 8.3, 6.4, 4.2])
+        fig = visualizeInformationRates(weights, sparseInfoRates)
+        self.assertTrue(fig is not None)
+        
+        fig = visualizeInformationRates(weights, sparseInfoRates, showAsBars=True)
+        self.assertTrue(fig is not None)
+    
+    def test_visualizeEnergies(self):
+        weights = np.array([0.1, 0.5, 0.75, 1.0, 5.0])
+        energies = np.array([15.0, 12.5, 8.3, 6.4, 4.2])
+        signalEnergy = 11.2
+        fig = visualizeEnergies(weights, energies)
+        self.assertTrue(fig is not None)
+        
+        fig = visualizeEnergies(weights, energies, showAsBars=True, signalEnergy=signalEnergy)
+        self.assertTrue(fig is not None)
+        
+    def test_visualizeInformationRatesOptimality(self):
+        scales = [32,64,128]
+        sparseInfoRates = [20, 10, 5.5]
+        
+        scalesRef = [32,48,128]
+        optimalInfoRates = [15, 8.4, 2.5]
+        
+        fig = visualizeInformationRatesOptimality(scales, sparseInfoRates, scalesRef, optimalInfoRates)
+        self.assertTrue(fig is not None)
         
 if __name__ == '__main__':
     np.seterr(all='raise')

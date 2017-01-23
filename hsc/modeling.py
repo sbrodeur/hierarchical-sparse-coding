@@ -29,6 +29,7 @@
 
 import logging
 import itertools
+import copy
 import collections
 import scipy
 import scipy.signal
@@ -242,6 +243,7 @@ class ConvolutionalDictionaryLearner(object):
                 validWindows = windows[np.where((l2norms > 0.0) & (l0norms > 1))]
             else:
                 validWindows = windows[np.where(l2norms > 0.0)]
+            
             for validWindow in validWindows:
                 patterns.append(validWindow)
                 nbPatternsFound += 1
@@ -343,7 +345,7 @@ class ConvolutionalDictionaryLearner(object):
             residualScale = np.max(np.abs(residual))
             energyResidual = np.sum(np.square(residual))
             snr = 10.0*np.log10(energySignal/energyResidual)
-            logger.info('SNR of %f dB achieved after %d iterations' % (snr, nbIterations))
+            logger.debug('SNR of %f dB achieved after %d iterations' % (snr, nbIterations))
             nbIterations += 1
             
             # Check stopping criteria
@@ -521,7 +523,7 @@ class ConvolutionalNMF(SparseApproximator):
             residualScale = np.max(np.abs(residual))
             energyResidual = np.sum(np.square(residual))
             snr = 10.0*np.log10(energySignal/energyResidual)
-            logger.info('SNR of %f dB achieved after %d iterations' % (snr, nbIterations))
+            logger.debug('SNR of %f dB achieved after %d iterations' % (snr, nbIterations))
             nbIterations += 1
             
             # Check stopping criteria
@@ -721,7 +723,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
                 else:
                     snr = 10.0*np.log10(energySignal/energyResidual)
                         
-                logger.debug('Matching pursuit iteration %d: event is (t = %d, f = %d, c = %f), snr = %f dB' % (nbIterations, t, fIdx, coefficient, snr))
+                #logger.debug('Matching pursuit iteration %d: event is (t = %d, f = %d, c = %f), snr = %f dB' % (nbIterations, t, fIdx, coefficient, snr))
                 nbIterations += 1
                 
                 # Check stopping criteria (fast)
@@ -750,10 +752,10 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             offset = not offset
             
             # Print information
-            logger.info('SNR of %f dB achieved after %d selection iterations' % (snr, nbSelections))
-            logger.info('Number of selection: %d' % (len(tIndices)))
-            logger.info('Number of non-zero coefficients: %d' % (nnz))
-            logger.info('Number of duplicate coefficients: %d' % (nbDuplicates))
+            logger.debug('SNR of %f dB achieved after %d selection iterations' % (snr, nbSelections))
+            logger.debug('Number of selection: %d' % (len(tIndices)))
+            logger.debug('Number of non-zero coefficients: %d' % (nnz))
+            logger.debug('Number of duplicate coefficients: %d' % (nbDuplicates))
 
         if minCoefficients is not None:
             # Clip small coefficients to zero
@@ -780,8 +782,8 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
     def _forwardPhase(self, sequence, multilevelDict, toleranceSnr=None, nbBlocks=1, alpha=0.5, singletonWeight=0.5):
         
         # Loop over all levels
-        coefficients = []
         input = sequence
+        coefficients = []
         for level in range(multilevelDict.getNbLevels()):
         
             if toleranceSnr is not None and isinstance(toleranceSnr, collections.Iterable):
@@ -807,7 +809,37 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
         
         return coefficients
 
-    def _backwardPhase(self, coefficients, multilevelDict):
+    def _forwardPhaseFromLevel(self, coefficients, multilevelDict, toleranceSnr=None, nbBlocks=1, alpha=0.5, singletonWeight=0.5):
+        
+        # Loop over all remaining levels, starting from the last level in the provided coefficients
+        fromLevel = len(coefficients)
+        input = coefficients[-1].todense()
+        for level in range(fromLevel, multilevelDict.getNbLevels()):
+        
+            if toleranceSnr is not None and isinstance(toleranceSnr, collections.Iterable):
+                targetSnr = toleranceSnr[level]
+            else:
+                targetSnr = toleranceSnr
+        
+            # Get dictionary at current level
+            D = multilevelDict.getRawDictionary(level)
+        
+            # Calculate the weights (reduce the score of the singletons)
+            nbSingletons = D.shape[0] - multilevelDict.countsNoSingletons[level]
+            weights = np.ones((D.shape[0],), dtype=D.dtype)
+            weights[:nbSingletons] = singletonWeight
+        
+            # Instanciate a new coder for current level and encode
+            cmp = ConvolutionalMatchingPursuit()
+            levelCoder = ConvolutionalSparseCoder(D, cmp)
+            levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)
+            
+            input = levelCoefficients.todense()
+            coefficients.append(levelCoefficients)
+        
+        return coefficients
+
+    def convertToDistributedCoefficients(self, coefficients):
         
         lastLevelCoefficients = coefficients[-1].copy()
         if scipy.sparse.issparse(lastLevelCoefficients):
@@ -816,9 +848,9 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
         
         # Loop over all levels
         newCoefficients = []
-        for level in range(multilevelDict.getNbLevels()):
+        for level in range(len(coefficients)):
             
-            if level < multilevelDict.getNbLevels() - 1:
+            if level < len(coefficients) - 1:
                 levelCoefficients = coefficients[level]
                 nbFeatures = levelCoefficients.shape[1]
                 
@@ -846,15 +878,28 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
             
         return newCoefficients
 
-    def computeCoefficients(self, sequence, multilevelDict, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, singletonWeight=0.5, returnDistributed=True):
-        assert isinstance(multilevelDict, MultilevelDictionary)
+    def _calculateResidual(self, sequence, coefficients, multilevelDict):
         
-        # Encode signal bottom-up through all layers
-        coefficients = self._forwardPhase(sequence, multilevelDict, toleranceSnr, nbBlocks, alpha, singletonWeight)
+        # Get the number of features at input level
+        baseDict = multilevelDict.getBaseDictionary()
+        if baseDict.ndim == 2:
+            reconstruction = np.zeros((coefficients[0].shape[0],), dtype=coefficients[0].dtype)
+        else:
+            reconstruction = np.zeros((coefficients[0].shape[0], baseDict.shape[-1]), dtype=coefficients[0].dtype)
+            
+        # Calculate residual based on the reconstruction
+        representations = multilevelDict.getMultiscaleDictionaries()
+        for level in range(multilevelDict.getNbLevels()):
+            reconstruction += reconstructSignal(coefficients[level], representations[level])
+        residual = sequence - reconstruction
+        
+        return residual
+
+    def _postprocessCoefficients(self, coefficients, multilevelDict, returnDistributed=True):
 
         # Remove redundancy across layers
         if returnDistributed:
-            coefficients = self._backwardPhase(coefficients, multilevelDict)
+            coefficients = self.convertToDistributedCoefficients(coefficients)
         else:
              # Loop over all levels
             newCoefficients = []
@@ -871,20 +916,27 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
                 newCoefficients.append(levelCoefficients)
             coefficients = newCoefficients
         
-        # Get the number of features at input level
-        baseDict = multilevelDict.getBaseDictionary()
-        if baseDict.ndim == 2:
-            reconstruction = np.zeros((coefficients[0].shape[0],), dtype=coefficients[0].dtype)
-        else:
-            reconstruction = np.zeros((coefficients[0].shape[0], baseDict.shape[-1]), dtype=coefficients[0].dtype)
-            
-        # Calculate residual based on the reconstruction
-        representations = multilevelDict.getMultiscaleDictionaries()
-        for level in range(multilevelDict.getNbLevels()):
-            reconstruction += reconstructSignal(coefficients[level], representations[level])
-        residual = sequence - reconstruction
+        return coefficients
+    
+    def computeCoefficients(self, sequence, multilevelDict, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, singletonWeight=0.5, returnDistributed=True):
+        assert isinstance(multilevelDict, MultilevelDictionary)
         
+        # Encode signal bottom-up through all layers
+        coefficients = self._forwardPhase(sequence, multilevelDict, toleranceSnr, nbBlocks, alpha, singletonWeight)
+        coefficients = self._postprocessCoefficients(coefficients, multilevelDict, returnDistributed)
+        residual = self._calculateResidual(sequence, coefficients, multilevelDict)
         return coefficients, residual
+    
+    def computeCoefficientsFromLevel(self, coefficients, multilevelDict, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, singletonWeight=0.5, returnDistributed=True):
+        assert isinstance(multilevelDict, MultilevelDictionary)
+
+        # FIXME: not sure why deep copy is needed here
+        coefficients = copy.deepcopy(coefficients)
+
+        # Encode signal bottom-up through all layers
+        coefficients = self._forwardPhaseFromLevel(coefficients, multilevelDict, toleranceSnr, nbBlocks, alpha, singletonWeight)
+        coefficients = self._postprocessCoefficients(coefficients, multilevelDict, returnDistributed)
+        return coefficients
     
 class ConvolutionalSparseCoder(object):
  
@@ -912,9 +964,13 @@ class HierarchicalConvolutionalSparseCoder(object):
         self.multilevelDict = multilevelDict
         self.approximator = approximator
  
-    def encode(self, X, *args, **kwargs):
-        assert X.ndim == 1 or X.ndim == 2
-        return self.approximator.computeCoefficients(X, self.multilevelDict, *args, **kwargs)
+    def encode(self, sequence, *args, **kwargs):
+        assert sequence.ndim == 1 or sequence.ndim == 2
+        return self.approximator.computeCoefficients(sequence, self.multilevelDict, *args, **kwargs)
+
+    def encodeFromLevel(self, coefficients, *args, **kwargs):
+        assert len(coefficients) > 0
+        return self.approximator.computeCoefficientsFromLevel(coefficients, self.multilevelDict, *args, **kwargs)
  
     def reconstruct(self, coefficients):
         assert len(coefficients) > 0

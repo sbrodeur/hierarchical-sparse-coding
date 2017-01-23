@@ -37,7 +37,7 @@ import matplotlib.pyplot as plt
 
 from hsc.dataset import MultilevelDictionary, scalesToWindowSizes, addSingletonBases
 from hsc.modeling import HierarchicalConvolutionalMatchingPursuit, HierarchicalConvolutionalSparseCoder, ConvolutionalDictionaryLearner
-from hsc.analysis import calculateBitForDatatype
+from hsc.analysis import calculateEmpiricalInformationRates
 from hsc.utils import findGridSize, profileFunction
 
 logger = logging.getLogger(__name__)
@@ -52,12 +52,15 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO)
     cdir = os.path.dirname(os.path.realpath(__file__))
+    outputResultPath = os.path.join(cdir, 'mlcsc')
+    if not os.path.exists(outputResultPath):
+        os.makedirs(outputResultPath)
     
     # Load reference multilevel dictionary from file
     filePath = os.path.join(cdir, 'multilevel-dict.pkl')
     multilevelDict = MultilevelDictionary.restore(filePath)
     
-    # Load the reference signal from file
+    # Load the reference training signal from file
     filePath = os.path.join(cdir, 'dataset-train.npz')
     trainData = np.load(filePath)
     trainSignal = trainData['signal']
@@ -65,7 +68,7 @@ if __name__ == "__main__":
     logger.info('Number of samples in dataset (training): %d' % (len(trainSignal)))
     logger.info('Number of events in dataset (training): %d' % (len(trainEvents)))
     
-    # Load the reference signal from file
+    # Load the reference testing signal from file
     filePath = os.path.join(cdir, 'dataset-test.npz')
     testData = np.load(filePath)
     testSignal = testData['signal']
@@ -73,35 +76,24 @@ if __name__ == "__main__":
     logger.info('Number of samples in dataset (testing): %d' % (len(testSignal)))
     logger.info('Number of events in dataset (testing): %d' % (len(testEvents)))
 
-    testSignal = testSignal[:20000]
+    # Reduce the size of the training and testing data
+    nbSamples = 20000
+    trainSignal = trainSignal[:nbSamples]
+    testSignal = testSignal[:nbSamples]
     
-    fig = plt.figure(figsize=(8,4), facecolor='white', frameon=True)
-    fig.canvas.set_window_title('Generated signal')
-    fig.subplots_adjust(left=0.1, right=0.95, bottom=0.15, top=0.95,
-                        hspace=0.01, wspace=0.01)
-    ax = fig.add_subplot(111)
-    n = np.arange(len(testSignal))
-    ax.plot(n, testSignal, color='k')
-    ax.set_xlim(0, len(testSignal))
-    r = np.max(np.abs(testSignal))
-    ax.set_ylim(-r, r)
-    ax.set_xlabel('Samples')
-    ax.set_ylabel('Amplitude')
-    #plt.show()
-    
+    # Learn multilevel dictionary on the training data
     dictionaries = []
-    inputTrain = trainSignal
-    
+    input = trainSignal
     counts = np.array([16, 32, 64])
     scales = np.array([32, 64, 96])
-    snrs = np.array([40.0, 10.0, 10.0])
+    snr = 10.0
     nbLevels = len(counts)
     widths = scalesToWindowSizes(scales)
-    for level, k, windowSize, snr in zip(range(nbLevels), counts, widths, snrs):
+    for level, k, windowSize in zip(range(nbLevels), counts, widths):
         
         logger.info('Learning dictionary (samples)...')
         cdl = ConvolutionalDictionaryLearner(k, windowSize, algorithm='samples', avoidSingletons=True)
-        D = cdl.train(inputTrain)
+        D = cdl.train(input)
         assert D.shape[0] == k
         dictionaries.append(D)
     
@@ -116,22 +108,38 @@ if __name__ == "__main__":
         hcmp = HierarchicalConvolutionalMatchingPursuit()
         hcsc = HierarchicalConvolutionalSparseCoder(multilevelDict, approximator=hcmp)
         
-        if level < nbLevels - 1:
-            # NOTE: for all levels but the last one, return the coefficients from the last level only, without redistributing the activations to lower levels
-            coefficients, residual = hcsc.encode(testSignal, nbNonzeroCoefs=None, toleranceSnr=snr, nbBlocks=100, alpha=0.0, singletonWeight=10.0, returnDistributed=False)
-            inputTrain = coefficients[-1].todense()
-        else:
-            coefficients, residual = hcsc.encode(testSignal, nbNonzeroCoefs=None, toleranceSnr=snr, nbBlocks=100, alpha=0.0, singletonWeight=10.0, returnDistributed=True)
+        # NOTE: for all levels but the last one, return the coefficients from the last level only, without redistributing the activations to lower levels
+        if level == 0:
+            coefficients, residual = hcsc.encode(trainSignal, toleranceSnr=snr, nbBlocks=100, alpha=0.0, singletonWeight=1.0, returnDistributed=False)
+        elif level < nbLevels - 1:
+            coefficients = hcsc.encodeFromLevel(coefficients, toleranceSnr=snr, nbBlocks=100, alpha=0.0, singletonWeight=1.0, returnDistributed=False)
+        input = coefficients[-1].todense()
+ 
+    # Visualize dictionary and save to disk as images
+    logger.info('Generating dictionary visualizations...')
+    figs = multilevelDict.visualize(maxCounts=16)
+    for l,fig in enumerate(figs):
+        fig.savefig(os.path.join(outputResultPath, 'dict-l%d.eps' % (l)), format='eps', dpi=1200)
     
-    # Analyze coefficients
-    logger.info('Analyzing final coefficients...')
+    # Save multi-level dictionary to disk, as the reference
+    filePath = os.path.join(outputResultPath, 'multilevel-dict.pkl')
+    logger.info('Saving dictionary to file: %s' % (filePath))
+    multilevelDict.save(filePath)
+    
+    # Analyze encoding on the test signal
+    logger.info('Analyzing encoding...')
+    hcmp = HierarchicalConvolutionalMatchingPursuit()
+    hcsc = HierarchicalConvolutionalSparseCoder(multilevelDict, approximator=hcmp)
+    coefficients, residual = hcsc.encode(testSignal, toleranceSnr=snr, nbBlocks=100, alpha=0.0, singletonWeight=1.0, returnDistributed=True)
     nbTotalCoefficients = np.sum([c.nnz for c in coefficients])
     logger.info('Total number of coefficients: %d' % (nbTotalCoefficients))
     for level, c in enumerate(coefficients):
         logger.info('Number of coefficients at level %d: %d (%4.1f%%)' % (level,c.nnz, float(c.nnz)/nbTotalCoefficients*100.0))
     
-    multilevelDict.visualize()
+    rawInfoRate, sparseInfoRate = calculateEmpiricalInformationRates(testSignal, coefficients, multilevelDict)
+    logger.info('Bitrate before encoding: %f bit/sample' % (rawInfoRate))
+    logger.info('Bitrate after encoding: %f bit/sample' % (sparseInfoRate))
+    logger.info('Compression ratio (raw/encoded): %f' % (rawInfoRate/sparseInfoRate))
     
     logger.info('All done.')
-    plt.show()
     
