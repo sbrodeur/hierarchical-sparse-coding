@@ -31,11 +31,9 @@ import os
 import logging
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from hsc.dataset import MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator
-from hsc.analysis import calculateMultilevelInformationRates, calculateBitForDatatype
+from hsc.dataset import MultilevelDictionary, MultilevelDictionaryGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -53,61 +51,27 @@ if __name__ == "__main__":
     
     # Generate multi-level dictionary
     logger.info('Generating new multi-level dictionary...')
-    scales = [32, 64, 128, 256]
-    counts = [4, 8, 16, 32]
-    decompositionSizes = [4, 4, 3, 3]
+    scales = [32, 64]
+    counts = [4, 1]
+    decompositionSizes = 4
     logger.info('Scales defined for levels: %s' % (str(scales)))
     logger.info('Counts defined for levels: %s' % (str(counts)))
     logger.info('Decomposition sizes defined for levels: %s' % (str(decompositionSizes)))
     
     mlgd = MultilevelDictionaryGenerator()
-    multilevelDict = mlgd.generate(scales, counts, decompositionSize=decompositionSizes,
-                                   positionSampling='random', weightSampling='random', multilevelDecomposition=False, 
+    multilevelDict = mlgd.generate(scales, counts, decompositionSize=decompositionSizes, 
+                                   positionSampling='random', multilevelDecomposition=True, 
                                    maxNbPatternsConsecutiveRejected=100, nonNegativity=False)
-    
-    # Save multi-level dictionary to disk, as the reference
-    filePath = os.path.join(cdir, 'multilevel-dict.pkl')
-    logger.info('Saving dictionary to file: %s' % (filePath))
-    multilevelDict.save(filePath)
     
     # Visualize dictionary and save to disk as images
     logger.info('Generating dictionary visualizations...')
-    figs = multilevelDict.visualize(maxCounts=16)
+    figs = multilevelDict.visualize(shuffle=False, annotate=True)
     for l,fig in enumerate(figs):
-        fig.savefig(os.path.join(cdir, 'dict-l%d.eps' % (l)), format='eps', dpi=1200)
+        fig.savefig(os.path.join(cdir, 'dict-decomp-l%d.eps' % (l)), format='eps', dpi=1200)
     
-    # Generate training and testing datasets
-    # NOTE: find the optimal rates to achieve about 20% of the raw bitrate when reducing to the first level
-    minimumCompressionRatio = 0.20
-    rates = 0.0005 * np.ones_like(scales)
-    for datasetName, nbSamples in [('train', int(1e7)), ('test', int(1e6))]:
-    
-        # Generate events and signal using the multi-level dictionary
-        logger.info('Generating events and raw temporal signal for dataset %s...' % (datasetName))
-        generator = SignalGenerator(multilevelDict, rates)
-        events, rates = generator.generateEvents(nbSamples, minimumCompressionRatio)
-        signal = generator.generateSignalFromEvents(events, nbSamples=nbSamples)
-        logger.info('Number of generated events: %d , in %d samples' % (len(events), len(signal)))
-        
-        # Save signal to disk, as the reference
-        np.savez_compressed('dataset-%s.npz' % (datasetName), signal=signal, events=events, rates=rates)
-    
-    # Visualize the beginning of the signal and save image to disk
-    logger.info('Generating figures for visualization...')
-    shortSignal = signal[:min(10000, len(signal))]
-    fig = plt.figure(figsize=(8,4), facecolor='white', frameon=True)
-    fig.canvas.set_window_title('Generated signal')
-    fig.subplots_adjust(left=0.1, right=0.95, bottom=0.15, top=0.95,
-                        hspace=0.01, wspace=0.01)
-    ax = fig.add_subplot(111)
-    n = np.arange(len(shortSignal))
-    ax.plot(n, shortSignal, color='k')
-    ax.set_xlim(0, len(shortSignal))
-    r = np.max(np.abs(shortSignal))
-    ax.set_ylim(-r, r)
-    ax.set_xlabel('Samples')
-    ax.set_ylabel('Amplitude')
-    fig.savefig(os.path.join(cdir, 'signal.eps'), format='eps', dpi=1200)
+    levels, fIdxs, positions, coefficients = multilevelDict.decompositions[0][0]
+    for level, fIdx, position, coefficient in zip(levels, fIdxs, positions, coefficients):
+        logger.info('Sub-element at level %d, filter index %d, position %d with coefficient %f' % (level, fIdx, position, coefficient))
     
     logger.info('All done.')
     plt.show()

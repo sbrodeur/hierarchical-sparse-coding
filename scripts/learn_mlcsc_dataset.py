@@ -110,9 +110,9 @@ if __name__ == "__main__":
         
         # NOTE: for all levels but the last one, return the coefficients from the last level only, without redistributing the activations to lower levels
         if level == 0:
-            coefficients, residual = hcsc.encode(trainSignal, toleranceSnr=snr, nbBlocks=100, alpha=0.0, singletonWeight=1.0, returnDistributed=False)
+            coefficients, residual = hcsc.encode(trainSignal, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=0.95, returnDistributed=False)
         elif level < nbLevels - 1:
-            coefficients = hcsc.encodeFromLevel(coefficients, toleranceSnr=snr, nbBlocks=100, alpha=0.0, singletonWeight=1.0, returnDistributed=False)
+            coefficients = hcsc.encodeFromLevel(coefficients, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=0.95, returnDistributed=False)
         input = coefficients[-1].todense()
  
     # Visualize dictionary and save to disk as images
@@ -130,7 +130,7 @@ if __name__ == "__main__":
     logger.info('Analyzing encoding...')
     hcmp = HierarchicalConvolutionalMatchingPursuit()
     hcsc = HierarchicalConvolutionalSparseCoder(multilevelDict, approximator=hcmp)
-    coefficients, residual = hcsc.encode(testSignal, toleranceSnr=snr, nbBlocks=100, alpha=0.0, singletonWeight=1.0, returnDistributed=True)
+    coefficients, residual = hcsc.encode(testSignal, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=0.95, returnDistributed=True)
     nbTotalCoefficients = np.sum([c.nnz for c in coefficients])
     logger.info('Total number of coefficients: %d' % (nbTotalCoefficients))
     for level, c in enumerate(coefficients):

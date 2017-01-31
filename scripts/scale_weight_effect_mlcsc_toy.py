@@ -28,6 +28,7 @@
 # OF SUCH DAMAGE.
 
 import os
+import copy
 import argparse
 import fnmatch
 import ctypes
@@ -43,59 +44,51 @@ from multiprocessing import Pool
 
 from hsc.dataset import MultilevelDictionary, scalesToWindowSizes, addSingletonBases
 from hsc.modeling import HierarchicalConvolutionalMatchingPursuit, HierarchicalConvolutionalSparseCoder, ConvolutionalDictionaryLearner
-from hsc.analysis import calculateEmpiricalInformationRates, calculateDistributionRatios, visualizeDistributionRatios, visualizeInformationRates, visualizeEnergies
-from hsc.utils import findGridSize, profileFunction
+from hsc.analysis import calculateMultilevelInformationRates, calculateEmpiricalInformationRates, calculateDistributionRatios, visualizeDistributionRatios, visualizeInformationRates, visualizeEnergies, visualizeInformationRatesOptimality
 
 logger = logging.getLogger(__name__)
 
-def learnMultilevelDictionary(trainSignal, testSignal, weight, resultsDir, overwrite=True):
+def learnMultilevelDictionary(multilevelDictRef, trainSignal, testSignal, weight, resultsDir, overwrite=True):
 
     resultFilePath = os.path.join(resultsDir, 'results-w%f.pkl' % weight)
     if not os.path.exists(resultFilePath) or overwrite:
-        
-        # Learn multilevel dictionary on the training data
-        dictionaries = []
-        input = trainSignal
-        scales = [32, 64, 128]
-        counts = [16, 32, 64]
-        snr = 20.0
-        nbLevels = len(counts)
+
+        # Add a handler to the root logger to write to file (per process)
+        log = logging.getLogger()
+        log.setLevel(logging.DEBUG)
+        logFilePath = os.path.join(resultsDir, "process_w%4.2f.log" % (weight))
+        if os.path.exists(logFilePath):
+            os.remove(logFilePath)
+        h = logging.FileHandler(logFilePath)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        h.setFormatter(formatter)
+        log.addHandler(h)
+        logger.info('Log for process will be written to file: %s' % (logFilePath))
+    
+        scales = [16, 64, 128, 256]
+        snrs = [40.0, 120.0, 120.0]
         widths = scalesToWindowSizes(scales)
-        for level, k, windowSize in zip(range(nbLevels), counts, widths):
+        coefficientsForScales = []
+        for level in range(multilevelDictRef.getNbLevels()):
             
-            # Learning dictionary
-            cdl = ConvolutionalDictionaryLearner(k, windowSize, algorithm='samples', avoidSingletons=True)
-            D = cdl.train(input)
-#             cdl = ConvolutionalDictionaryLearner(k, windowSize, algorithm='kmean', avoidSingletons=True)
-#             D = cdl.train(input, nbRandomWindows=10000, maxIterations=100, tolerance=0.0, initMethod='random_samples')
-            assert D.shape[0] == k
-            dictionaries.append(D)
-        
-            # Encoding signal
-            if level > 0:
-                # NOTE: since the dictionaries for the higher levels were learned on expanded representations (with singletons), the later must be added explicitly
-                #       before creating the multilevel dictionary
-                multilevelDict = MultilevelDictionary.fromRawDictionaries(addSingletonBases(dictionaries), scales[:len(dictionaries)], hasSingletonBases=True)
-            else:
-                multilevelDict = MultilevelDictionary.fromRawDictionaries(dictionaries, scales[:len(dictionaries)])
-                
+            multilevelDict = multilevelDictRef.upToLevel(level)
             hcmp = HierarchicalConvolutionalMatchingPursuit()
             hcsc = HierarchicalConvolutionalSparseCoder(multilevelDict, approximator=hcmp)
             
             # NOTE: for all levels but the last one, return the coefficients from the last level only, without redistributing the activations to lower levels
+            snr = snrs[level]
             if level == 0:
-                coefficients, residual = hcsc.encode(trainSignal, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=weight, returnDistributed=False)
-            elif level < nbLevels - 1:
-                coefficients = hcsc.encodeFromLevel(coefficients, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=weight, returnDistributed=False)
-            input = coefficients[-1].todense()
+                testCoefficients, _ = hcsc.encode(testSignal, toleranceSnr=snr, nbBlocks=1, alpha=0.0, singletonWeight=weight, returnDistributed=False)
+            else:
+                testCoefficients = hcsc.encodeFromLevel(testSignal, testCoefficients, toleranceSnr=snr, nbBlocks=1, alpha=0.0, singletonWeight=weight, returnDistributed=False)
+                
+            coefficientsForScales.append(testCoefficients)
     
-        # Analyze encoding on the test signal
-        hcmp = HierarchicalConvolutionalMatchingPursuit()
-        hcsc = HierarchicalConvolutionalSparseCoder(multilevelDict, approximator=hcmp)
-        coefficients, residual = hcsc.encode(testSignal, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=weight, returnDistributed=True)
+        coefficientsForScales = [hcmp.convertToDistributedCoefficients(coefficients) for coefficients in coefficientsForScales]
+        assert len(coefficientsForScales) == multilevelDictRef.getNbLevels()
         
         # Save results to file, for later analysis
-        results = (weight, multilevelDict, coefficients)
+        results = (weight, multilevelDict, coefficientsForScales)
         with open(resultFilePath, 'wb') as file:
             pickle.dump(results, file, protocol=pickle.HIGHEST_PROTOCOL)
 
@@ -131,19 +124,19 @@ if __name__ == "__main__":
                         action="store_true")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     cdir = os.path.dirname(os.path.realpath(__file__))
-    outputResultPath = os.path.join(cdir, 'mlcsc-weight-effect')
+    outputResultPath = os.path.join(cdir, 'mlcsc-scale-weight-effect-toy')
     if not os.path.exists(outputResultPath):
         os.makedirs(outputResultPath)
     resultsFilePath = os.path.join(outputResultPath, 'results.pkl')
     
     # Load reference multilevel dictionary from file
-    filePath = os.path.join(cdir, 'multilevel-dict.pkl')
-    multilevelDict = MultilevelDictionary.restore(filePath)
+    filePath = os.path.join(cdir, 'multilevel-dict-toy.pkl')
+    multilevelDictRef = MultilevelDictionary.restore(filePath)
     
     # Load the reference training signal from file
-    filePath = os.path.join(cdir, 'dataset-train.npz')
+    filePath = os.path.join(cdir, 'dataset-train-toy.npz')
     trainData = np.load(filePath)
     trainSignal = trainData['signal']
     trainEvents = trainData['events']
@@ -151,36 +144,70 @@ if __name__ == "__main__":
     logger.info('Number of events in dataset (training): %d' % (len(trainEvents)))
     
     # Load the reference testing signal from file
-    filePath = os.path.join(cdir, 'dataset-test.npz')
+    filePath = os.path.join(cdir, 'dataset-test-toy.npz')
     testData = np.load(filePath)
     testSignal = testData['signal']
     testEvents = testData['events']
+    testRates = testData['rates']
     logger.info('Number of samples in dataset (testing): %d' % (len(testSignal)))
     logger.info('Number of events in dataset (testing): %d' % (len(testEvents)))
 
     # Reduce the size of the training and testing data
-    nbSamples = 20000
+    nbSamples = 100000
     trainSignal = trainSignal[:nbSamples]
     testSignal = testSignal[:nbSamples]
     
     # Values of weights to evaluate
-    weights = np.array([0.75, 0.80, 0.9, 1.0, 2.0])
+    weights = [0.75, 0.80, 1.0, 2.0]
     def f(w):
-        return learnMultilevelDictionary(trainSignal, testSignal, w, resultsDir=outputResultPath, overwrite=args.overwrite_results)
+        return learnMultilevelDictionary(multilevelDictRef, trainSignal, testSignal, w, resultsDir=outputResultPath, overwrite=args.overwrite_results)
     
     # Use all available cores on the CPU
-    p = Pool(1)
+    p = Pool()
     p.map(f, weights)
+    #[f(w) for w in weights]
     
     # Load results from files
     results = loadResults(outputResultPath)
     
-    # Extract results
+    # Get optimal information rate across levels
+    optimalInfoRates = calculateMultilevelInformationRates(multilevelDictRef, testRates, dtype=testSignal.dtype)
+    optimalScales = multilevelDictRef.scales
+    
+    # Visualize information rate distribution across levels
+    fig = plt.figure(figsize=(8,8), facecolor='white', frameon=True)
+    ax = fig.add_subplot(111)
+
+    linestyles = ['-','--', '-.', ':']
+    assert len(linestyles) >= len(results)
+    for i, (weight, multilevelDict, coefficientsForScales) in enumerate(results):
+         
+        # Get empirical information rate across levels
+        sparseInfoRates = []
+        for coefficients in coefficientsForScales:
+            rawInfoRate, sparseInfoRate = calculateEmpiricalInformationRates(testSignal, coefficients, multilevelDict)
+            sparseInfoRates.append(sparseInfoRate)
+        sparseInfoRates = np.array(sparseInfoRates)
+    
+        # Plot for current weight
+        ax.plot(multilevelDict.scales, sparseInfoRates, linestyles[i], color='k', label=r'$\beta$ = %4.2f' % (weight))
+    
+    # Lower bound
+    ax.plot(optimalScales, optimalInfoRates, linestyle='-', color='k', linewidth=3, label='Lower bound')
+        
+    ax.set_title('Information rate distribution')
+    ax.set_xlabel('Maximum scale')
+    ax.set_ylabel('Information rate [bit/sample]')
+    ax.legend()
+    
+    fig.savefig(os.path.join(outputResultPath, 'optimality.eps'), format='eps', dpi=1200)
+    
     weights = []
-    sparseInfoRates = []
     distributions = []
     energies = []
-    for weight, multilevelDict, coefficients in results:
+    for i, (weight, multilevelDict, coefficientsForScales) in enumerate(results):
+        # Consider all levels
+        coefficients = coefficientsForScales[-1]
         
         weights.append(weight)
         
@@ -188,25 +215,26 @@ if __name__ == "__main__":
         distribution = calculateDistributionRatios(coefficients)
         distributions.append(distribution)
         
-        # Information rate
-        rawInfoRate, sparseInfoRate = calculateEmpiricalInformationRates(testSignal, coefficients, multilevelDict)
-        sparseInfoRates.append(sparseInfoRate)
-        
         # Coefficient energies
         energy = 0.0
         for c in coefficients:
+            c = c.tocsr()
             energy += c.multiply(c).sum()
         energies.append(energy)
         
     weights = np.array(weights)
-    sparseInfoRates = np.array(sparseInfoRates)
     distributions = np.array(distributions)
     energies = np.array(energies)
     
-    # Information rate analysis
-    logger.info('Analysing information rates...')
-    fig = visualizeInformationRates(weights, sparseInfoRates, showAsBars=True)
-    fig.savefig(os.path.join(outputResultPath, 'information-rate-effect.eps'), format='eps', dpi=1200)
+
+    for i, (weight, multilevelDict, coefficientsForScales) in enumerate(results):
+        print weight
+        # Consider all levels
+        for level,coefficients in enumerate(coefficientsForScales):
+            # Coefficient distribution across levels
+            distribution = calculateDistributionRatios(coefficients)
+            print level+1
+            print distribution, np.sum([coefficients[l].nnz for l in range(level+1)])
     
     # Distribution analysis
     logger.info('Analysing distribution across levels...')

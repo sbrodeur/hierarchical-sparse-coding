@@ -143,16 +143,16 @@ def visualizeDistributionRatios(weights, distributions):
     # NOTE: reverse order so that the legend show the level in the same order as the bars
     bars = []
     colors = ['#606060', '#B8B8B8', '#E0E0E0', '#F0F0F0', '#FFFFFF']
-    for level in range(len(distributions[0]))[::-1]:
+    for level in range(distributions.shape[1])[::-1]:
         if level > 0:
             bottom = cumulatives.T[level-1]
         else:
             bottom = None
-        bar = ax.bar(bar_left, distributions.T[level], bar_width, label='Level %d' % (level), bottom=bottom, color=colors[level])
+        bar = ax.bar(bar_left, distributions.T[level], bar_width, label='Level %d' % (level+1), bottom=bottom, color=colors[level])
         bars.append(bar)
     
     ax.set_ylabel('Distribution ratio')
-    ax.set_xlabel('Singleton weighting')
+    ax.set_xlabel(r'$\beta$ weight')
     ax.set_xticks(tick_pos) 
     ax.set_xticklabels(['%4.2f' % (w) for w in weights])
     ax.set_yticks(np.arange(0.0, 1.1, 0.1))
@@ -191,7 +191,7 @@ def visualizeInformationRates(weights, sparseInfoRates, showAsBars=False):
     
     ax.set_ylim([0.0, 1.1 * np.max(sparseInfoRates)])
     ax.set_ylabel('Information rate [bit/sample]')
-    ax.set_xlabel('Singleton weighting')
+    ax.set_xlabel(r'$\beta$ weight')
     
     return fig
     
@@ -223,7 +223,7 @@ def visualizeEnergies(weights, energies, showAsBars=False, signalEnergy=None):
     
     ax.set_ylim([0.0, 1.1 * np.max(energies)])
     ax.set_ylabel('Energy')
-    ax.set_xlabel('Singleton weighting')
+    ax.set_xlabel(r'$\beta$ weight')
     
     return fig
 

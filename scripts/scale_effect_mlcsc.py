@@ -36,6 +36,7 @@ import cPickle as pickle
 import collections
 import numpy as np
 import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from multiprocessing import Pool
@@ -53,7 +54,7 @@ def learnMultilevelDictionary(trainSignal, testSignal):
     input = trainSignal
     scales = [32, 64, 128, 256, 512]
     counts = [16, 32, 64, 128, 256]
-    snr = 40.0
+    snr = 30.0
     nbLevels = len(counts)
     widths = scalesToWindowSizes(scales)
     coefficientsForScales = []
@@ -78,11 +79,11 @@ def learnMultilevelDictionary(trainSignal, testSignal):
         
         # NOTE: for all levels but the last one, return the coefficients from the last level only, without redistributing the activations to lower levels
         if level == 0:
-            coefficients, _ = hcsc.encode(trainSignal, toleranceSnr=snr, nbBlocks=100, alpha=0.0, singletonWeight=1.0, returnDistributed=False)
-            testCoefficients, _ = hcsc.encode(testSignal, toleranceSnr=snr, nbBlocks=100, alpha=0.0, singletonWeight=1.0, returnDistributed=False)
+            coefficients, _ = hcsc.encode(trainSignal, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=1.0, returnDistributed=False)
+            testCoefficients, _ = hcsc.encode(testSignal, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=1.0, returnDistributed=False)
         elif level < nbLevels - 1:
-            coefficients = hcsc.encodeFromLevel(coefficients, toleranceSnr=snr, nbBlocks=100, alpha=0.0, singletonWeight=1.0, returnDistributed=False)
-            testCoefficients = hcsc.encodeFromLevel(testCoefficients, toleranceSnr=snr, nbBlocks=100, alpha=0.0, singletonWeight=1.0, returnDistributed=False)
+            coefficients = hcsc.encodeFromLevel(coefficients, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=1.0, returnDistributed=False)
+            testCoefficients = hcsc.encodeFromLevel(testCoefficients, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=1.0, returnDistributed=False)
             
         input = coefficients[-1].todense()
         coefficientsForScales.append(testCoefficients)
