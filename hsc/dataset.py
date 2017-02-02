@@ -748,8 +748,11 @@ class SignalGenerator(object):
                 
         # Convert to mixed-type numpy array
         events = np.array(events, dtype=('int32,int32,int32,float32'))
-                
-        return events, rates
+        
+        if minimumCompressionRatio is not None:
+            return events, rates
+        else:
+            return events
                 
     def generateSignalFromEvents(self, events, nbSamples=None):
         

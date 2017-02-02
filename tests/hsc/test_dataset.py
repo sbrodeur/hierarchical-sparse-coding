@@ -107,23 +107,27 @@ class TestMultilevelDictionary(unittest.TestCase):
                 self.assertTrue(np.allclose(np.sqrt(np.sum(np.square(base))), 1.0))
                     
     def test_fromDecompositions(self):
-        mldg = MultilevelDictionaryGenerator()
-        multilevelDictRef = mldg.generate(scales=[16, 32, 63], counts=[4, 8, 15],
-                                          decompositionSize=2, multilevelDecomposition=True, 
-                                          maxNbPatternsConsecutiveRejected=10)
         
-        multilevelDict = MultilevelDictionary.fromDecompositions(multilevelDictRef.getBaseDictionary(), multilevelDictRef.decompositions, multilevelDictRef.scales)
-        self.assertTrue(multilevelDict.getNbLevels() == multilevelDictRef.getNbLevels())
-        for decompositionRef, decomposition in zip(multilevelDictRef.decompositions, multilevelDict.decompositions):
-            for (selectedLevelsRef, selectedIndicesRef, positionsRef, coefficientsRef), \
-                (selectedLevels, selectedIndices, positions, coefficients) in zip(decompositionRef, decomposition):
-                self.assertTrue(np.allclose(selectedLevelsRef, selectedLevels))
-                self.assertTrue(np.allclose(selectedIndicesRef, selectedIndices))
-                self.assertTrue(np.allclose(positionsRef, positions))
-                self.assertTrue(np.allclose(coefficientsRef, coefficients))
-        for i in range(multilevelDict.getNbLevels()):
-            self.assertTrue(np.allclose(multilevelDict.representations[i], multilevelDictRef.representations[i], atol=1e-6))
-        
+        for isMultilevel in [True, False]:
+            mldg = MultilevelDictionaryGenerator()
+            multilevelDictRef = mldg.generate(scales=[16, 32, 63], counts=[4, 8, 15],
+                                              decompositionSize=2, multilevelDecomposition=isMultilevel, 
+                                              maxNbPatternsConsecutiveRejected=10)
+            
+            multilevelDict = MultilevelDictionary.fromDecompositions(multilevelDictRef.getBaseDictionary(), multilevelDictRef.decompositions, multilevelDictRef.scales)
+            self.assertTrue(multilevelDict.getNbLevels() == multilevelDictRef.getNbLevels())
+            for decompositionRef, decomposition in zip(multilevelDictRef.decompositions, multilevelDict.decompositions):
+                for (selectedLevelsRef, selectedIndicesRef, positionsRef, coefficientsRef), \
+                    (selectedLevels, selectedIndices, positions, coefficients) in zip(decompositionRef, decomposition):
+                    self.assertTrue(np.allclose(selectedLevelsRef, selectedLevels))
+                    self.assertTrue(np.allclose(selectedIndicesRef, selectedIndices))
+                    self.assertTrue(np.allclose(positionsRef, positions))
+                    self.assertTrue(np.allclose(coefficientsRef, coefficients))
+            for i in range(multilevelDict.getNbLevels()):
+                self.assertTrue(np.allclose(multilevelDict.representations[i], multilevelDictRef.representations[i], atol=1e-6))
+            for i in range(multilevelDict.getNbLevels()):
+                self.assertTrue(np.allclose(multilevelDict.dictionaries[i], multilevelDictRef.dictionaries[i], atol=1e-6))
+            
     def test_fromBaseDictionary(self):
         
         mldg = MultilevelDictionaryGenerator()
@@ -316,7 +320,7 @@ class TestSignalGenerator(unittest.TestCase):
         rate = 0.1
         multilevelDict = mldg.generate(scales=[31,63], counts=[nbPatterns, nbPatterns], maxNbPatternsConsecutiveRejected=100)
         generator = SignalGenerator(multilevelDict, rates=[rate, rate])
-        events = generator.generateEvents(nbSamples, minimumCompressionRatio=0.5)
+        events, rates = generator.generateEvents(nbSamples, minimumCompressionRatio=0.5)
         signal = generator.generateSignalFromEvents(events, nbSamples=nbSamples)
         self.assertTrue(len(signal) == nbSamples)
         signal = generator.generateSignalFromEvents(events)

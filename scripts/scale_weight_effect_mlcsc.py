@@ -65,50 +65,25 @@ def learnMultilevelDictionary(multilevelDictRef, trainSignal, testSignal, weight
         log.addHandler(h)
         logger.info('Log for process will be written to file: %s' % (logFilePath))
     
-        # Learn multilevel dictionary on the training data
-#        dictionaries = []
-        input = trainSignal
-        scales = [32, 64, 128, 256]
-        counts = [16, 32, 64]
-        snrs = [40.0, 120.0, 120.0]
-        nbLevels = len(counts)
-        widths = scalesToWindowSizes(scales)
+        snrs = [40.0, 120.0, 120.0, 120.0]
         coefficientsForScales = []
-        for level, k, windowSize in zip(range(nbLevels), counts, widths):
+        for level in range(multilevelDictRef.getNbLevels()):
             
-            snr = snrs[level]
-            
-#             # Learning dictionary
-#             cdl = ConvolutionalDictionaryLearner(k, windowSize, algorithm='samples', avoidSingletons=True)
-#             D = cdl.train(input)
-#             assert D.shape[0] == k
-#             dictionaries.append(D)
-        
-#             # Encoding signal
-#             if level > 0:
-#                 # NOTE: since the dictionaries for the higher levels were learned on expanded representations (with singletons), the later must be added explicitly
-#                 #       before creating the multilevel dictionary
-#                 multilevelDict = MultilevelDictionary.fromRawDictionaries(addSingletonBases(dictionaries), scales[:len(dictionaries)], hasSingletonBases=True)
-#             else:
-#                 multilevelDict = MultilevelDictionary.fromRawDictionaries(multilevelDictRef.dictionaries[:level], multilevelDictRef.scales[:level])
-                
             multilevelDict = multilevelDictRef.upToLevel(level)
             hcmp = HierarchicalConvolutionalMatchingPursuit()
             hcsc = HierarchicalConvolutionalSparseCoder(multilevelDict, approximator=hcmp)
             
             # NOTE: for all levels but the last one, return the coefficients from the last level only, without redistributing the activations to lower levels
+            snr = snrs[level]
             if level == 0:
-                #coefficients, _ = hcsc.encode(trainSignal, toleranceSnr=snr, nbBlocks=1, alpha=0.0, singletonWeight=weight, returnDistributed=False)
                 testCoefficients, _ = hcsc.encode(testSignal, toleranceSnr=snr, nbBlocks=1, alpha=0.0, singletonWeight=weight, returnDistributed=False)
             else:
-                #coefficients = hcsc.encodeFromLevel(trainSignal, coefficients, toleranceSnr=snr, nbBlocks=1, alpha=0.0, singletonWeight=weight, returnDistributed=False)
                 testCoefficients = hcsc.encodeFromLevel(testSignal, testCoefficients, toleranceSnr=snr, nbBlocks=1, alpha=0.0, singletonWeight=weight, returnDistributed=False)
                 
-            #input = coefficients[-1].todense()
             coefficientsForScales.append(testCoefficients)
     
         coefficientsForScales = [hcmp.convertToDistributedCoefficients(coefficients) for coefficients in coefficientsForScales]
-        assert len(coefficientsForScales) == nbLevels
+        assert len(coefficientsForScales) == multilevelDictRef.getNbLevels()
         
         # Save results to file, for later analysis
         results = (weight, multilevelDict, coefficientsForScales)
@@ -176,7 +151,7 @@ if __name__ == "__main__":
     logger.info('Number of events in dataset (testing): %d' % (len(testEvents)))
 
     # Reduce the size of the training and testing data
-    nbSamples = 10000
+    nbSamples = 100000
     trainSignal = trainSignal[:nbSamples]
     testSignal = testSignal[:nbSamples]
     

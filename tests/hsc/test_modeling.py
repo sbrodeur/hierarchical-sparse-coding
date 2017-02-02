@@ -658,7 +658,7 @@ class TestHierarchicalConvolutionalMatchingPursuit(unittest.TestCase):
         nbSamples = 4096
         rates = [1e-3, 1e-3, 1e-3]
         generator = SignalGenerator(multilevelDict, rates)
-        events = generator.generateEvents(nbSamples, minimumCompressionRatio=0.50)
+        events, rates = generator.generateEvents(nbSamples, minimumCompressionRatio=0.50)
         signal = generator.generateSignalFromEvents(events, nbSamples)
         
         hcmp = HierarchicalConvolutionalMatchingPursuit()
@@ -677,7 +677,7 @@ class TestHierarchicalConvolutionalSparseCoder(unittest.TestCase):
         nbSamples = 4096
         rates = [1e-3, 1e-3, 1e-3]
         generator = SignalGenerator(multilevelDict, rates)
-        events = generator.generateEvents(nbSamples, minimumCompressionRatio=0.50)
+        events, rates = generator.generateEvents(nbSamples, minimumCompressionRatio=0.50)
         signal = generator.generateSignalFromEvents(events, nbSamples)
         
         hcmp = HierarchicalConvolutionalMatchingPursuit()

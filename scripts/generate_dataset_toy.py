@@ -31,7 +31,7 @@ import os
 import logging
 import numpy as np
 import matplotlib
-#matplotlib.use('Agg')
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from hsc.dataset import MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator
@@ -139,11 +139,9 @@ if __name__ == "__main__":
     
     # Visualize the beginning of the signal and save image to disk
     logger.info('Generating figures for visualization...')
-    shortSignal = signal[:min(10000, len(signal))]
-    fig = plt.figure(figsize=(8,4), facecolor='white', frameon=True)
+    shortSignal = signal[:min(5000, len(signal))]
+    fig = plt.figure(figsize=(4,4), facecolor='white', frameon=True)
     fig.canvas.set_window_title('Generated signal')
-    fig.subplots_adjust(left=0.1, right=0.95, bottom=0.15, top=0.95,
-                        hspace=0.01, wspace=0.01)
     ax = fig.add_subplot(111)
     n = np.arange(len(shortSignal))
     ax.plot(n, shortSignal, color='k')
@@ -152,6 +150,7 @@ if __name__ == "__main__":
     ax.set_ylim(-r, r)
     ax.set_xlabel('Samples')
     ax.set_ylabel('Amplitude')
+    fig.tight_layout()
     fig.savefig(os.path.join(cdir, 'signal-toy.eps'), format='eps', dpi=1200)
     
     logger.info('All done.')

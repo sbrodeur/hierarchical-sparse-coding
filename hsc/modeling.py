@@ -856,14 +856,10 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
                     condition = False
                 return condition
         
-            verbose = False
-            if level > 0:
-                verbose = True
-        
             # Instanciate a new coder for current level and encode
             cmp = ConvolutionalMatchingPursuit()
             levelCoder = ConvolutionalSparseCoder(D, cmp)
-            levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights, verbose=verbose)#, stopCondition=stopInputSnrTolerance)
+            levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)#, stopCondition=stopInputSnrTolerance)
             
             input = levelCoefficients.todense()
             coefficients.append(levelCoefficients)

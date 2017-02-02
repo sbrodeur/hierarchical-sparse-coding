@@ -37,7 +37,7 @@ import cPickle as pickle
 import collections
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')
+#matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from multiprocessing import Pool
@@ -65,9 +65,7 @@ def learnMultilevelDictionary(multilevelDictRef, trainSignal, testSignal, weight
         log.addHandler(h)
         logger.info('Log for process will be written to file: %s' % (logFilePath))
     
-        scales = [16, 64, 128, 256]
-        snrs = [40.0, 120.0, 120.0]
-        widths = scalesToWindowSizes(scales)
+        snrs = [40.0, 120.0, 120.0, 120.0]
         coefficientsForScales = []
         for level in range(multilevelDictRef.getNbLevels()):
             
