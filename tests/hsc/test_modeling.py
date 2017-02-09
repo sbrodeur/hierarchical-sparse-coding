@@ -35,7 +35,8 @@ import scipy.sparse
 import numpy as np
 
 from hsc.modeling import ConvolutionalMatchingPursuit, ConvolutionalSparseCoder, ConvolutionalDictionaryLearner, HierarchicalConvolutionalSparseCoder, HierarchicalConvolutionalMatchingPursuit, \
-                         extractRandomWindows, convolve1d, convolve1d_batch, extractWindows, extractWindowsBatch, reconstructSignal, ConvolutionalNMF, HierarchicalConvolutionalSparseCoder
+                         extractRandomWindows, convolve1d, convolve1d_batch, extractWindows, extractWindowsBatch, reconstructSignal, ConvolutionalNMF, HierarchicalConvolutionalSparseCoder, \
+                         MptkConvolutionalMatchingPursuit, LoCOMP
 from hsc.utils import normalize, overlapAdd
 from hsc.dataset import MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator
 
@@ -117,6 +118,97 @@ class TestConvolutionalDictionaryLearner(unittest.TestCase):
             D = cdl.train(sequence, nbRandomWindows=32, maxIterations=100, tolerance=0.0, resetMethod=resetMethod)
             self.assertTrue(np.array_equal(D.shape, [16,5,nbFeatures]))
 
+class TestMptkConvolutionalMatchingPursuit(unittest.TestCase):
+    
+    def test_computeCoefficients_1d(self):
+        
+        # 1D sequence
+        nbNonzeroCoefs = 4
+        for dsize in [1,2,3]:
+            for dwidth in [3,5,6]:
+                cmp = MptkConvolutionalMatchingPursuit(method='mp')
+                sequence = np.random.random(size=(16,))
+                D = normalize(np.random.random(size=(dsize,dwidth)), axis=1)
+                coefficients, residual = cmp.computeCoefficients(sequence, D, nbNonzeroCoefs=nbNonzeroCoefs)
+                self.assertTrue(coefficients.nnz == nbNonzeroCoefs)
+                self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
+        
+    def test_computeCoefficients_2d(self):
+        
+        # 2D sequence
+        nbNonzeroCoefs = 1
+        nbFeatures = 7
+        cmp = MptkConvolutionalMatchingPursuit(method='mp')
+        sequence = np.random.random(size=(128,nbFeatures))
+        D = normalize(np.random.random(size=(16,15,nbFeatures)), axis=(1,2))
+        coefficients, residual = cmp.computeCoefficients(sequence, D, nbNonzeroCoefs=nbNonzeroCoefs)
+        self.assertTrue(coefficients.nnz == nbNonzeroCoefs)
+        self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
+    
+    def test_optimality_1d(self):
+    
+        N = 128     # Number of samples
+        fs = 8000   # Sampling frequency
+        f0 = 80
+        f1 = 200
+        sig1 = np.sin(np.arange(N).astype(np.float32)/fs*2*np.pi*f0) * np.hanning(N)
+        sig2 = np.sin(np.arange(N).astype(np.float32)/fs*2*np.pi*f1) * np.hanning(N)
+         
+        # Normalize and create dictionary
+        sig1 /= np.sqrt(np.sum(np.square(sig1)))
+        sig2 /= np.sqrt(np.sum(np.square(sig2)))
+        D = np.vstack([sig1, sig2])
+
+        signal = np.zeros(8192)
+        nnz = 32
+        fIndices = np.random.randint(low=0, high=D.shape[0], size=(nnz,))
+        positions = np.random.randint(low=0, high=len(signal) - D.shape[1], size=(nnz,))
+        for fIdx, position in zip(fIndices, positions):
+            signal[position:position+D.shape[1]] += D[fIdx,:]
+        
+        cmp = MptkConvolutionalMatchingPursuit(method='cmp')
+        coefficients, residual = cmp.computeCoefficients(signal, D, toleranceSnr=40.0)
+        self.assertTrue(coefficients.nnz < 2.0 * nnz)
+
+class TestLoCOMP(unittest.TestCase):
+
+    def test_computeCoefficients_1d(self):
+        
+        # 1D sequence
+        nbNonzeroCoefs = 16
+        cmp = LoCOMP()
+        sequence = np.random.random(size=(64,))
+        D = normalize(np.random.random(size=(16,15)), axis=1)
+        coefficients, residual = cmp.computeCoefficients(sequence, D, nbNonzeroCoefs=nbNonzeroCoefs)
+        self.assertTrue(coefficients.nnz == nbNonzeroCoefs)
+        self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
+        
+        nbNonzeroCoefs = 4
+        for dsize in [1,2,3]:
+            for dwidth in [3,5,6]:
+                cmp = LoCOMP()
+                sequence = np.random.random(size=(16,))
+                D = normalize(np.random.random(size=(dsize,dwidth)), axis=1)
+                coefficients, residual = cmp.computeCoefficients(sequence, D, nbNonzeroCoefs=nbNonzeroCoefs)
+                print coefficients.nnz, nbNonzeroCoefs
+                self.assertTrue(coefficients.nnz == nbNonzeroCoefs)
+                self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
+        
+       
+        
+    def test_computeCoefficients_2d(self):
+        
+        # 2D sequence
+        nbNonzeroCoefs = 16
+        nbFeatures = 7
+        cmp = LoCOMP()
+        sequence = np.random.random(size=(64,nbFeatures))
+        D = normalize(np.random.random(size=(16,15,nbFeatures)), axis=(1,2))
+        coefficients, residual = cmp.computeCoefficients(sequence, D, nbNonzeroCoefs=nbNonzeroCoefs)
+        self.assertTrue(coefficients.nnz == nbNonzeroCoefs)
+        self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
+
+
 class TestConvolutionalMatchingPursuit(unittest.TestCase):
 
     def test_computeCoefficients_1d(self):
@@ -144,7 +236,7 @@ class TestConvolutionalMatchingPursuit(unittest.TestCase):
         self.assertTrue(coefficients.nnz == nbNonzeroCoefs)
         self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
 
-    def test_doSelection(self):
+    def test_selectBestAtoms(self):
         
         # Odd filter size, with and without offset, fixed number of blocks (no interference expected)
         filterWidth = 5
@@ -152,13 +244,17 @@ class TestConvolutionalMatchingPursuit(unittest.TestCase):
         cmp = ConvolutionalMatchingPursuit()
         innerProducts = np.arange(256).reshape((64,4)).astype(np.float)
         innerProducts[-1] = innerProducts[-1][::-1]
-        t, fIdx = cmp._doSelection(innerProducts, filterWidth, nbBlocks, offset=False)
+        atoms = cmp._selectBestAtoms(innerProducts, filterWidth, nbBlocks, offset=False)
+        t = [atom.position for atom in atoms]
+        fIdx = [atom.index for atom in atoms]
         self.assertTrue(len(t) == nbBlocks)
         self.assertTrue(len(fIdx) == nbBlocks)
         self.assertTrue(np.array_equal(t,[63,47,31,15]))
         self.assertTrue(np.array_equal(fIdx,[0,3,3,3]))
         self.assertTrue(np.allclose(np.abs(innerProducts[t[0], fIdx[0]]), np.abs(np.max(innerProducts))))
-        t, fIdx = cmp._doSelection(innerProducts, filterWidth, nbBlocks, offset=True)
+        atoms = cmp._selectBestAtoms(innerProducts, filterWidth, nbBlocks, offset=True)
+        t = [atom.position for atom in atoms]
+        fIdx = [atom.index for atom in atoms]
         self.assertTrue(len(t) == nbBlocks+1)
         self.assertTrue(len(fIdx) == nbBlocks+1)
         self.assertTrue(np.array_equal(t,[63,55,39,23,7]))
@@ -171,7 +267,9 @@ class TestConvolutionalMatchingPursuit(unittest.TestCase):
         cmp = ConvolutionalMatchingPursuit()
         innerProducts = np.arange(256).reshape((64,4)).astype(np.float)
         innerProducts[-1] = innerProducts[-1][::-1]
-        t, fIdx = cmp._doSelection(innerProducts, filterWidth, nbBlocks, offset=False)
+        atoms = cmp._selectBestAtoms(innerProducts, filterWidth, nbBlocks, offset=False)
+        t = [atom.position for atom in atoms]
+        fIdx = [atom.index for atom in atoms]
         self.assertTrue(len(t) == 6)
         self.assertTrue(len(fIdx) == 6)
         self.assertTrue(np.array_equal(t,[63,59,47,35,23,11]))
@@ -184,7 +282,9 @@ class TestConvolutionalMatchingPursuit(unittest.TestCase):
         cmp = ConvolutionalMatchingPursuit()
         innerProducts = np.arange(256).reshape((64,4)).astype(np.float)
         innerProducts[-1] = innerProducts[-1][::-1]
-        t, fIdx = cmp._doSelection(innerProducts, filterWidth, nbBlocks, offset=False)
+        atoms = cmp._selectBestAtoms(innerProducts, filterWidth, nbBlocks, offset=False)
+        t = [atom.position for atom in atoms]
+        fIdx = [atom.index for atom in atoms]
         self.assertTrue(len(t) == nbBlocks)
         self.assertTrue(len(fIdx) == nbBlocks)
         self.assertTrue(np.array_equal(t,[59,47,35,23,11])) # Missing 63 because of interference
@@ -243,7 +343,7 @@ class TestConvolutionalSparseCoder(unittest.TestCase):
             self.assertTrue(coefficients.nnz > 0)
             self.assertTrue(np.max(np.abs(residual)) < tolerance)
     
-    def test_encode_1d_optimality(self):
+    def test_encode_1d_optimality_cmp(self):
         
         # Toy problem to solve
         cmp = ConvolutionalMatchingPursuit()
@@ -260,6 +360,25 @@ class TestConvolutionalSparseCoder(unittest.TestCase):
         coefficients, residual = csc.encode(sequence, nbNonzeroCoefs=8, minCoefficients=1e-6)
         self.assertTrue(coefficients.nnz == coefficientsRef.nnz)
         self.assertTrue(np.allclose(coefficients.toarray(), coefficientsRef.toarray()))
+        self.assertTrue(np.allclose(residual, np.zeros_like(residual), atol=1e-6))
+            
+    def test_encode_1d_optimality_locomp(self):
+        
+        # Toy problem to solve
+        cmp = LoCOMP()
+        nbComponents = 4
+        filterWidth = 32
+        D = normalize(np.random.random(size=(nbComponents, filterWidth)), axis=1)
+        csc = ConvolutionalSparseCoder(D, approximator=cmp)
+        
+        coefficientsRef = scipy.sparse.coo_matrix(([1.0,1.0,0.5,1.0,0.75,2.0], 
+                                                ([32,48,64,96,128,192], [0,3,1,0,2,2])),
+                                               shape = (256,nbComponents))
+        sequence = reconstructSignal(coefficientsRef, D)
+        
+        coefficients, residual = csc.encode(sequence, minCoefficients=1e-10)
+        self.assertTrue(coefficients.nnz == coefficientsRef.nnz)
+        self.assertTrue(np.allclose(coefficients.toarray(), coefficientsRef.toarray(), atol=1e-1))
         self.assertTrue(np.allclose(residual, np.zeros_like(residual), atol=1e-6))
             
     def test_reconstruct_1d(self):
@@ -691,5 +810,14 @@ class TestHierarchicalConvolutionalSparseCoder(unittest.TestCase):
         self.assertTrue(np.array_equal(signal.shape, reconstruction.shape))
         
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.WARN)
     np.seterr(all='raise')
     unittest.main()
+
+#     logging.basicConfig(level=logging.DEBUG)
+#     np.random.seed(42)
+#     suite = unittest.TestSuite()
+#     suite.addTest(TestLoCOMP('test_computeCoefficients_1d'))
+#     suite.addTest(TestLoCOMP('test_computeCoefficients_2d'))
+#     suite.addTest(TestConvolutionalSparseCoder('test_encode_1d_optimality_locomp'))
+#     unittest.TextTestRunner().run(suite)

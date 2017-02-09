@@ -93,7 +93,7 @@ if __name__ == "__main__":
     logger.info('Generating new multi-level dictionary...')
     scales = [16, 64, 128, 256]
     counts = [4, 8, 16, 32]
-    decompositionSizes = [3, 3, 2, 2]
+    decompositionSizes = [None, 3, 2, 2]
     logger.info('Scales defined for levels: %s' % (str(scales)))
     logger.info('Counts defined for levels: %s' % (str(counts)))
     logger.info('Decomposition sizes defined for levels: %s' % (str(decompositionSizes)))
@@ -101,7 +101,7 @@ if __name__ == "__main__":
     mlgd = MultilevelDictionaryGenerator()
     multilevelDict = mlgd.generate(scales, counts, decompositionSize=decompositionSizes,
                                    positionSampling='no-overlap', weightSampling='random', multilevelDecomposition=False,
-                                   maxNbPatternsConsecutiveRejected=100, nonNegativity=False)
+                                   maxNbPatternsConsecutiveRejected=1000, nonNegativity=False)
     
     # Save multi-level dictionary to disk, as the reference
     filePath = os.path.join(cdir, 'multilevel-dict-toy.pkl')
@@ -115,7 +115,7 @@ if __name__ == "__main__":
         fig.savefig(os.path.join(cdir, 'dict-l%d-toy.eps' % (l)), format='eps', dpi=1200)
     
     # Generate training and testing datasets
-    for datasetName, nbSamples in [('train', int(1e7)), ('test', int(1e6))]:
+    for datasetName, nbSamples in [('train', int(1e7)), ('test', int(1e5))]:
     
         # Generate events and signal using the multi-level dictionary
         logger.info('Generating events and raw temporal signal for dataset %s...' % (datasetName))

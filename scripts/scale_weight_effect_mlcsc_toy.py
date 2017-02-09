@@ -37,7 +37,7 @@ import cPickle as pickle
 import collections
 import numpy as np
 import matplotlib
-#matplotlib.use('Agg')
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from multiprocessing import Pool
@@ -70,15 +70,15 @@ def learnMultilevelDictionary(multilevelDictRef, trainSignal, testSignal, weight
         for level in range(multilevelDictRef.getNbLevels()):
             
             multilevelDict = multilevelDictRef.upToLevel(level)
-            hcmp = HierarchicalConvolutionalMatchingPursuit()
+            hcmp = HierarchicalConvolutionalMatchingPursuit(useMPTK=True)
             hcsc = HierarchicalConvolutionalSparseCoder(multilevelDict, approximator=hcmp)
             
             # NOTE: for all levels but the last one, return the coefficients from the last level only, without redistributing the activations to lower levels
             snr = snrs[level]
             if level == 0:
-                testCoefficients, _ = hcsc.encode(testSignal, toleranceSnr=snr, nbBlocks=1, alpha=0.0, singletonWeight=weight, returnDistributed=False)
+                testCoefficients, _ = hcsc.encode(testSignal, toleranceSnr=snr, nbBlocks=50, alpha=0.1, singletonWeight=weight, returnDistributed=False)
             else:
-                testCoefficients = hcsc.encodeFromLevel(testSignal, testCoefficients, toleranceSnr=snr, nbBlocks=1, alpha=0.0, singletonWeight=weight, returnDistributed=False)
+                testCoefficients = hcsc.encodeFromLevel(testSignal, testCoefficients, toleranceSnr=snr, nbBlocks=50, alpha=0.1, singletonWeight=weight, returnDistributed=False)
                 
             coefficientsForScales.append(testCoefficients)
     
@@ -150,20 +150,16 @@ if __name__ == "__main__":
     logger.info('Number of samples in dataset (testing): %d' % (len(testSignal)))
     logger.info('Number of events in dataset (testing): %d' % (len(testEvents)))
 
-    # Reduce the size of the training and testing data
-    nbSamples = 100000
-    trainSignal = trainSignal[:nbSamples]
-    testSignal = testSignal[:nbSamples]
-    
     # Values of weights to evaluate
-    weights = [0.75, 0.80, 1.0, 2.0]
+    #weights = [0.75, 0.9, 1.0, 2.0]
+    weights = [1.0]
     def f(w):
         return learnMultilevelDictionary(multilevelDictRef, trainSignal, testSignal, w, resultsDir=outputResultPath, overwrite=args.overwrite_results)
     
     # Use all available cores on the CPU
-    p = Pool()
-    p.map(f, weights)
-    #[f(w) for w in weights]
+    #p = Pool()
+    #p.map(f, weights)
+    [f(w) for w in weights]
     
     # Load results from files
     results = loadResults(outputResultPath)
@@ -173,7 +169,7 @@ if __name__ == "__main__":
     optimalScales = multilevelDictRef.scales
     
     # Visualize information rate distribution across levels
-    fig = plt.figure(figsize=(8,8), facecolor='white', frameon=True)
+    fig = plt.figure(figsize=(4,5), facecolor='white', frameon=True)
     ax = fig.add_subplot(111)
 
     linestyles = ['-','--', '-.', ':']
@@ -193,11 +189,13 @@ if __name__ == "__main__":
     # Lower bound
     ax.plot(optimalScales, optimalInfoRates, linestyle='-', color='k', linewidth=3, label='Lower bound')
         
-    ax.set_title('Information rate distribution')
+    #ax.set_title('Information rate distribution')
     ax.set_xlabel('Maximum scale')
     ax.set_ylabel('Information rate [bit/sample]')
-    ax.legend()
+    ax.set_ylim([0, 10])
+    ax.legend()#fontsize='small'
     
+    fig.tight_layout()
     fig.savefig(os.path.join(outputResultPath, 'optimality.eps'), format='eps', dpi=1200)
     
     weights = []

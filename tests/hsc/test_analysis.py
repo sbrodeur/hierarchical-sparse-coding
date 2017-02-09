@@ -28,6 +28,7 @@
 # OF SUCH DAMAGE.
 
 import os
+import logging
 import unittest
 import numpy as np
 import scipy
@@ -152,5 +153,6 @@ class TestFunctions(unittest.TestCase):
         self.assertTrue(fig is not None)
         
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.WARN)
     np.seterr(all='raise')
     unittest.main()

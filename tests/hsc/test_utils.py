@@ -28,6 +28,7 @@
 # OF SUCH DAMAGE.
 
 import os
+import logging
 import unittest
 import numpy as np
 
@@ -217,5 +218,6 @@ class TestFunctions(unittest.TestCase):
         self.assertTrue(np.allclose(s, sequence))
                 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.WARN)
     np.seterr(all='raise')
     unittest.main()

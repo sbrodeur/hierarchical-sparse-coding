@@ -27,7 +27,9 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY 
 # OF SUCH DAMAGE.
 
+import os
 import logging
+import tempfile
 import itertools
 import copy
 import collections
@@ -136,6 +138,9 @@ def convolve1d(sequence, filters, padding='valid'):
     else:
         nbFeatures = filters.shape[-1]
     assert nbFeatures == sequence.shape[-1]
+
+    # TODO: when to use scipy.signal.fftconvolve?
+    # convolve fiters by the signal
 
     # Create a strided view of the sequence
     w = as_strided(sequence, shape=((sequence.shape[0] - width + 1), sequence.shape[1], width),
@@ -550,12 +555,157 @@ class ConvolutionalNMF(SparseApproximator):
     
         return coefficients, residual
 
+class MptkConvolutionalMatchingPursuit(SparseApproximator):
+
+    def __init__(self, method='mp'):
+        self.method = method
+
+    def _createMptkDict(self, D):
+
+        # Save MPTK table data to binary file (Row-major layout, double precision)
+        fd, dataFilePath = tempfile.mkstemp(suffix='.bin')
+        os.close(fd)
+        np.array(D, order='C', dtype=np.float64).tofile(dataFilePath)
+
+        # Save MPTK table definition to XML file
+        tableXml = """<?xml version="1.0" encoding="ISO-8859-1"?>
+        <table>
+        <libVersion>0.7.0</libVersion>
+        <param name="numChans" value="%i"/>
+        <param name="filterLen" value="%i"/>
+        <param name="numFilters" value="%i"/>
+        <param name="data" value="%s"/>
+        </table>
+        """ % (D.shape[2], D.shape[1], D.shape[0], dataFilePath)
+        fd, tableFilePath = tempfile.mkstemp(suffix='.xml')
+        os.write(fd, tableXml)
+        os.close(fd)
+        
+        # Save MPTK dictionary definition to XML file
+        dictXml = """<?xml version="1.0" encoding="iso-8859-1" ?>
+        <dict>
+        <libVersion>0.7.0</libVersion>
+        <block>
+        <param name="type" value="anywave" />
+        <param name="tableFileName" value="%s" />
+        <param name="windowShift" value="1" />
+        </block>
+        </dict>
+        """ % (tableFilePath)
+        fd, dictFilePath = tempfile.mkstemp(suffix='.xml')
+        os.write(fd, dictXml)
+        os.close(fd)
+        
+        return dictFilePath, tableFilePath, dataFilePath
+
+    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceSnr=None):
+        assert sequence.ndim == 1 or sequence.ndim == 2
+        assert D.ndim == 2 or D.ndim == 3
+
+        import mptk
+        mptk.loadconfig('/usr/local/mptk/path.xml')
+
+        if sequence.ndim == 1:
+            squeezeOutput = True
+            sequence = sequence[:,np.newaxis]
+        else:
+            squeezeOutput = False
+            
+        if D.ndim == 2:
+            squeezeOutput = True
+            D = D[:,:,np.newaxis]
+
+        try:
+            fs = np.min([D.shape[1], sequence.shape[0]])
+            dictFilePath, tableFilePath, dataFilePath = self._createMptkDict(D)
+            if toleranceSnr is not None:
+                book, residual = mptk.decompose(sequence, dictFilePath, fs, snr=toleranceSnr, method=self.method)
+            elif nbNonzeroCoefs is not None:
+                book, residual = mptk.decompose(sequence, dictFilePath, fs, numiters=nbNonzeroCoefs, method=self.method)
+            
+            # Get the sparse activations from the MPTK book
+            fIndices = np.array([atom['anywaveIdx'] for atom in book.atoms], dtype=np.int)
+            positions = np.array([atom['pos'][0] for atom in book.atoms], dtype=np.int)
+            amplitudes = np.array([atom['amp'][0] for atom in book.atoms], dtype=np.float32)
+            
+            # Create sparse coefficient matrix
+            coefficients = scipy.sparse.coo_matrix((amplitudes, (positions, fIndices)), shape=(sequence.shape[0], D.shape[0]))
+            coefficients = coefficients.tocsc()
+            
+            residual = residual.astype(np.float32)
+            
+        finally:
+            # Remove temporary files
+            os.remove(dictFilePath)
+            os.remove(tableFilePath)
+            os.remove(dataFilePath)
+
+        if squeezeOutput:
+            residual = np.squeeze(residual, axis=1)
+
+        return coefficients, residual
+
+
+class Atom(object):
+    
+    def __init__(self, position, index, coefficient, length):
+        self.__dict__.update(position=position, index=index, coefficient=coefficient, length=length)
+
+    def getPositionSpanIndices(self, sequenceLength=None):
+        if np.mod(self.length, 2) == 0:
+            # Even
+            startIdx = self.position - (self.length/2-1)
+        else:
+            # Odd
+            startIdx = self.position - (self.length/2)
+        endIdx = self.position + (self.length/2)
+        
+        if sequenceLength is not None:
+            startIdx = max(startIdx, 0)
+            endIdx = min(endIdx, sequenceLength-1)
+            
+        return startIdx, endIdx
+
+    def __str__(self):
+        return 'Atom no.%d of length %d at position %d, c = %f' % (self.index, self.length, self.position, self.coefficient)
+
+    def __repr__(self):
+        return self.__str__()
+
 class ConvolutionalMatchingPursuit(SparseApproximator):
 
-    def __init__(self):
-        pass
+    def __init__(self, verbose=False):
 
-    def _doSelection(self, innerProducts, filterWidth, nbBlocks=1, offset=False, nullCoeffThres=0.0, weights=None):
+        if verbose:
+            plt.ion()
+            self.fig = plt.figure(figsize=(12,8), facecolor='white', frameon=True)
+        else:
+            self.fig = None
+        self.verbose = verbose
+
+    def _updateDemo(self, atom, D, residual):
+        
+        logger.info('Matching pursuit iteration %d: raw event is (t = %d, f = %d, c = %f)' % (nbIterations, atom.position, atom.index, atom.coefficient))
+                    
+        plt.clf()
+        ax1 = self.fig.add_subplot(211)
+        ax1.plot(residual, '-k', linewidth=2)
+        
+        basis = atom.coefficient*D[atom.index]
+        startIdx, endIdx = atom.getPositionSpanIndices(residual.shape[0])
+        basisTime = np.arange(startIdx, endIdx+1)
+        ax1.plot(np.ones_like(basis) * basisTime[:,np.newaxis], basis, '-r', linewidth=1)
+        ax1.set_title('Coefficient = %f' % (atom.coefficient))
+        ax1.axvline(x=atom.position, color='gray', linestyle='--')
+        ax1.set_xlim((atom.position - 2 * D.shape[1], t + 2 * D.shape[1]))
+        
+        ax2 = fig.add_subplot(212)
+        ax2.plot(residual, '-k', linewidth=2)
+        ax2.axvline(x=atom.position, color='gray', linestyle='--')
+        
+        self.fig.canvas.draw()
+
+    def _selectBestAtoms(self, innerProducts, filterWidth, nbBlocks=1, offset=False, nullCoeffThres=0.0, weights=None):
         
          # Calculate the score for selection
         if weights is None:
@@ -626,13 +776,87 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             t, fIdx = np.unravel_index(np.argmax(np.abs(scores)), scores.shape)
             t = np.stack((t,))
             fIdx = np.stack((fIdx,))
-        
+            coefficients = innerProducts[t, fIdx]
+            
+            # Remove activations that have null coefficients (e.g. because of padding)
+            coefficients = innerProducts[t, fIdx]
+            nullMask = np.where(np.abs(coefficients) > nullCoeffThres)
+            t, fIdx, coefficients = t[nullMask], fIdx[nullMask], coefficients[nullMask]
+            
         assert np.all(t >= 0) and np.all(t < innerProducts.shape[0])
         assert np.all(fIdx >= 0) and np.all(fIdx < innerProducts.shape[1])
         
-        return t, fIdx
+        # Create the list of atom instances
+        atoms = [Atom(p, f, c, filterWidth) for p, f, c in zip(t, fIdx, coefficients)]
         
-    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, weights=None, stopCondition=None, verbose=False):
+        return atoms
+        
+    def _updateCoefficients(self, coefficients, atoms, replace=True):
+        
+        positions = [atom.position for atom in atoms]
+        indices = [atom.index for atom in atoms]
+        coefficientsAtom = np.array([atom.coefficient for atom in atoms], dtype=coefficients.dtype)
+        if replace:
+            coefficients[positions, indices] = coefficientsAtom
+        else:
+            coefficients[positions, indices] += coefficientsAtom
+            
+        return coefficients
+    
+    def _updateResidual(self, residual, energyResidual, atoms, D):
+
+        energyLoss = 0.0
+        for atom in atoms:
+            # Update the residual by removing the contribution of the selected filter
+            # NOTE: negate the coefficient to actually perform a overlap-remove operation.
+            localEnergyBefore = np.sum(np.square(peek(residual, atom.length, atom.position)))
+            overlapAdd(residual, -atom.coefficient*D[atom.index], atom.position, copy=False)
+            localEnergyAfter = np.sum(np.square(peek(residual, atom.length, atom.position)))
+            energyLoss += (localEnergyBefore - localEnergyAfter)
+        
+        if energyLoss < 0.0:
+           logger.warn('Residual energy increased by %f' % (-energyLoss))
+        #assert energyLoss >= 0.0
+        energyResidual -= energyLoss
+        
+        return residual, energyResidual
+        
+    def _updateInnerProducts(self, innerProducts, residual, atoms, D):
+        
+        # TODO: optimize by removing loop since all atoms should be close together (i.e. they have common support)
+        for atom in atoms:
+        
+            # Update the inner products
+            # First, calculate the span of the residual that needs to be convolved again, 
+            # and the padding required if at the beginning or end of the residual
+            width = atom.length
+            padStart = 0
+            if np.mod(width, 2) == 0:
+                # Even width
+                tstart = atom.position-width/2+1-(width-1)
+            else:
+                # Odd width
+                tstart = atom.position-width/2-(width-1)
+            startIdx = max(0,tstart)
+            if tstart < 0:
+                padStart = -tstart
+                    
+            tend = atom.position+width/2+(width-1)
+            endIdx = min(residual.shape[0]-1, tend)
+            padEnd = 0
+            if tend > residual.shape[0]-1:
+                padEnd = tend - (residual.shape[0]-1)
+            assert endIdx - startIdx >= 0
+            assert padStart >= 0 and padEnd >= 0
+             
+            paddedResidual = np.pad(residual[startIdx:endIdx+1], [(padStart, padEnd)] + [(0,0) for _ in range(residual.ndim-1)], mode='reflect')
+            localInnerProducts = convolve1d(paddedResidual, D, padding='valid')
+            assert localInnerProducts.shape[0] == width + (width-1)
+            overlapReplace(innerProducts, localInnerProducts, atom.position, copy=False)
+        
+        return innerProducts
+        
+    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, weights=None, stopCondition=None):
         assert sequence.ndim == 1 or sequence.ndim == 2
         assert D.ndim == 2 or D.ndim == 3
 
@@ -645,10 +869,6 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         if D.ndim == 2:
             squeezeOutput = True
             D = D[:,:,np.newaxis]
-
-        if verbose:
-            plt.ion()
-            fig = plt.figure(figsize=(12,8), facecolor='white', frameon=True)
 
         # Initialize the residual and sparse coefficients
         energySignal = np.sum(np.square(sequence))
@@ -673,81 +893,27 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             nullCoeffThres = alpha * np.max(np.abs(innerProducts))
             if minCoefficients is not None:
                 nullCoeffThres = min(minCoefficients, nullCoeffThres)
-            tIndices, fIndices = self._doSelection(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=nullCoeffThres, weights=weights)
-            for t, fIdx in zip(tIndices, fIndices):
+            atoms = self._selectBestAtoms(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=nullCoeffThres, weights=weights)
+            for atom in atoms:
         
-                # Find the maximum activation over the whole sequence and filters
-                coefficient = innerProducts[t, fIdx]
+                if self.verbose:
+                    self._updateDemo(atom, D, residual)
                 
-                if verbose:
-                    logger.info('Matching pursuit iteration %d: raw event is (t = %d, f = %d, c = %f)' % (nbIterations, t, fIdx, coefficient))
-                    
-                    plt.clf()
-                    ax1 = fig.add_subplot(211)
-                    ax1.plot(residual, '-k', linewidth=2)
-                    
-                    basis = coefficient*D[fIdx]
-                    if np.mod(D.shape[1], 2) == 0:
-                        # Even
-                        basisTime = np.arange(t - (D.shape[1]/2-1), t + (D.shape[1]/2) + 1)
-                    else:
-                        # Odd
-                        basisTime = np.arange(t - (D.shape[1]/2), t + (D.shape[1]/2) + 1)
-                        
-                    ax1.plot(np.ones_like(basis) * basisTime[:,np.newaxis], basis, '-r', linewidth=1)
-                    ax1.set_title('Coefficient = %f' % (coefficient))
-                    ax1.axvline(x=t, color='gray', linestyle='--')
-                    ax1.set_xlim((t - 2 * D.shape[1], t + 2 * D.shape[1]))
-                    
-                    ax2 = fig.add_subplot(212)
-                    ax2.plot(residual, '-k', linewidth=2)
-                    ax2.axvline(x=t, color='gray', linestyle='--')
-                    
-                    fig.canvas.draw()
-                
-                # Update the sparse coefficients
-                if np.abs(coefficients[t, fIdx]) > 0.0:
+                if np.abs(coefficients[atom.position, atom.index]) > 0.0:
                     # Count duplicate coefficients if already existing
                     nbDuplicates += 1
-                elif np.abs(coefficient) > 0.0:
+                elif np.abs(atom.coefficient) > 0.0:
                     # Count non-zero coefficients
                     nnz += 1
-                coefficients[t, fIdx] += coefficient
-    
-                # Update the residual by removing the contribution of the selected filter
-                # NOTE: negate the coefficient to actually perform a overlap-remove operation.
-                localEnergyBefore = np.sum(np.square(peek(residual, D.shape[1], t)))
-                overlapAdd(residual, -coefficient*D[fIdx], t, copy=False)
-                localEnergyAfter = np.sum(np.square(peek(residual, D.shape[1], t)))
-                energyResidual -= (localEnergyBefore - localEnergyAfter)
+                
+                # Update the sparse coefficients
+                coefficients = self._updateCoefficients(coefficients, atoms, replace=False)
+                
+                # Update the residual by removing the contribution of the selected atoms
+                residual, energyResidual = self._updateResidual(residual, energyResidual, atoms, D)
                 
                 # Update the inner products
-                # First, calculate the span of the residual that needs to be convolved again, 
-                # and the padding required if at the beginning or end of the residual
-                width = D.shape[1]
-                padStart = 0
-                if np.mod(width, 2) == 0:
-                    # Even width
-                    tstart = t-width/2+1-(width-1)
-                else:
-                    # Odd width
-                    tstart = t-width/2-(width-1)
-                startIdx = max(0,tstart)
-                if tstart < 0:
-                    padStart = -tstart
-                        
-                tend = t+width/2+(width-1)
-                endIdx = min(residual.shape[0]-1, tend)
-                padEnd = 0
-                if tend > residual.shape[0]-1:
-                    padEnd = tend - (residual.shape[0]-1)
-                assert endIdx - startIdx >= 0
-                assert padStart >= 0 and padEnd >= 0
-                 
-                paddedResidual = np.pad(residual[startIdx:endIdx+1], [(padStart, padEnd)] + [(0,0) for _ in range(residual.ndim-1)], mode='reflect')
-                localInnerProducts = convolve1d(paddedResidual, D, padding='valid')
-                assert localInnerProducts.shape[0] == width + (width-1)
-                overlapReplace(innerProducts, localInnerProducts, t, copy=False)
+                innerProducts = self._updateInnerProducts(innerProducts, residual, atoms, D)
                 
                 # Print information about current iteration
                 eps = 1e-20 
@@ -757,7 +923,6 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
                 else:
                     snr = 10.0*np.log10(energySignal/energyResidual)
                         
-                logger.debug('Matching pursuit iteration %d: event is (t = %d, f = %d, c = %f), snr = %f dB' % (nbIterations, t, fIdx, coefficient, snr))
                 nbIterations += 1
                 
                 # Check stopping criteria (fast)
@@ -776,7 +941,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
                 logger.debug('Tolerance for residual scale (absolute value) reached')
                 converged = True
 
-            if len(tIndices) == 0:
+            if len(atoms) == 0:
                 # This means all coefficients are null
                 logger.warn('Selection returned empty set: considering convergence is achieved')
                 converged = True
@@ -793,7 +958,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             
             # Print information
             logger.debug('SNR of %f dB achieved after %d selection iterations' % (snr, nbSelections))
-            logger.debug('Number of selection: %d' % (len(tIndices)))
+            logger.debug('Number of selection: %d' % (len(atoms)))
             logger.debug('Number of non-zero coefficients: %d' % (nnz))
             logger.debug('Number of duplicate coefficients: %d' % (nbDuplicates))
 
@@ -814,10 +979,224 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
 
         return coefficients, residual
 
+class LoCOMP(ConvolutionalMatchingPursuit):
+    """
+    Low-complexity Orthogonal Matching Pursuit (LoCOMP)
+    From: A low complexity Orthogonal Matching Pursuit for sparse signal approximation with shift-invariant dictionaries
+    http://ieeexplore.ieee.org/document/4960366/
+    
+    For information about OMP, see:
+    https://www.mathworks.com/help/wavelet/ug/matching-pursuit-algorithms.html
+    """
+    
+    def __init__(self):
+        super(LoCOMP, self).__init__()
+    
+    def _precomputeGramMatrixForShifts(self, D):
+        """
+        Compute the Gram matrix between dictionary bases for all time shifts, depending on the filter width.
+        """
+        G = []
+        filterWidth = D.shape[1]
+        for t in range(-filterWidth+1, filterWidth):
+            if t < 0:
+                shiftedD = np.pad(D[:, :filterWidth+t], [(0,0), (0,-t)] + [(0,0) for _ in range(D.ndim-2)], mode='constant')
+            elif t >= 0:
+                shiftedD = np.pad(D[:, t:], [(0,0), (t,0)] + [(0,0) for _ in range(D.ndim-2)], mode='constant')
+            Gt = np.dot(shiftedD.reshape(D.shape[0], -1), D.reshape(D.shape[0], -1).T)
+            G.append(Gt)
+        
+        G = np.stack(G, axis=2)
+        return G
+
+    def _findCommonSupportAtoms(self, atom, coefficients, D):
+        
+        # TODO: is it more efficient to use CSC format rather than LIL for column indexing?
+        #coefficients = coefficients.tocsc()
+        
+        sequenceLength = coefficients.shape[0]
+        atomLength = D.shape[1]
+        startIdx, endIdx = atom.getPositionSpanIndices(sequenceLength)
+        startIdx = max(startIdx - atomLength/2, 0)
+        if np.mod(atomLength, 2) == 0:
+            # Even
+            endIdx = min(endIdx + atomLength/2-1, sequenceLength)
+        else:
+            endIdx = min(endIdx + atomLength/2, sequenceLength)
+        subspace = coefficients[startIdx:endIdx+1,:].tocoo()
+        atoms = [Atom(startIdx+position, index, coefficient, atomLength) for position, index, coefficient in zip(subspace.row, subspace.col, subspace.data)]
+        return atoms
+    
+    def _getDictionaryFromSupportAtoms(self, sequence, atoms, D):
+        
+        minStartIdx = np.Inf
+        maxEndIdx = 0
+        for atom in atoms:
+            startIdx, endIdx = atom.getPositionSpanIndices(sequence.shape[0])
+            if startIdx < minStartIdx:
+                minStartIdx = startIdx
+            if endIdx > maxEndIdx:
+                maxEndIdx = endIdx
+        supportLength = maxEndIdx - minStartIdx + 1
+        
+        Dsup = []
+        for atom  in atoms:
+            signal = np.zeros((supportLength,) + sequence.shape[1:], dtype=D.dtype)
+            overlapAdd(signal, D[atom.index], atom.position - minStartIdx, copy=False)
+            Dsup.append(signal)
+        Dsup = np.stack(Dsup)
+        sequenceSup = sequence[minStartIdx:maxEndIdx+1]
+        assert np.array_equal(Dsup.shape[1:], sequenceSup.shape)
+        
+        return Dsup, sequenceSup
+    
+    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.0, minCoefficients=1e-15, weights=None, stopCondition=None, G=None):
+        assert sequence.ndim == 1 or sequence.ndim == 2
+        assert D.ndim == 2 or D.ndim == 3
+
+        if sequence.ndim == 1:
+            squeezeOutput = True
+            sequence = sequence[:,np.newaxis]
+        else:
+            squeezeOutput = False
+            
+        if D.ndim == 2:
+            squeezeOutput = True
+            D = D[:,:,np.newaxis]
+
+        if G is None:
+            G = self._precomputeGramMatrixForShifts(D)
+
+        # Initialize the residual and sparse coefficients
+        energySignal = np.sum(np.square(sequence))
+        residual = np.copy(sequence)
+        energyResidual = energySignal
+        
+        coefficients = scipy.sparse.lil_matrix((sequence.shape[0], D.shape[0]))
+        
+        # Convolve the input signal once, then locally recompute the affected projections when the residual is changed. 
+        innerProducts = convolve1d(residual, D, padding='same')
+                
+        # Loop until convergence or if any stopping criteria is met
+        nbIterations = 0
+        offset = False
+        converged = False
+        nbSelections = 0
+        while not converged:
+
+            # Adaptive selection: rejection if coefficients are less that alpha times the maximum.
+            nullCoeffThres = alpha * np.max(np.abs(innerProducts))
+            if minCoefficients is not None:
+                nullCoeffThres = max(minCoefficients, nullCoeffThres)
+            atoms = self._selectBestAtoms(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=nullCoeffThres, weights=weights)
+            for atom in atoms:
+        
+                if coefficients[atom.position, atom.index] != 0.0:
+                    logger.warn('Redundant atom selected: %s' % (str(atom)))
+                #assert coefficients[atom.position, atom.index] == 0.0
+        
+                commonSupportAtoms = self._findCommonSupportAtoms(atom, coefficients, D)
+                if len(commonSupportAtoms) > 0:
+                    # Common support with other atoms, so calculate the orthogonal projection
+                    commonSupportAtoms = [atom,] + commonSupportAtoms
+                    Dsup, residualSup =  self._getDictionaryFromSupportAtoms(residual, commonSupportAtoms, D)
+                
+                    # Calculate the orthogonal projection of the dictionary on the residual
+                    # NOTE: use the Moore-Penrose pseudoinverse method
+                    DsupF = Dsup.reshape((Dsup.shape[0], -1))
+                    #Gsup = np.dot(np.linalg.inv(np.dot(DsupF, DsupF.T)), DsupF)
+                    Gsup = np.linalg.pinv(DsupF).T
+                    coefficientsSup = np.dot(Gsup, residualSup.flatten()).flatten()
+                
+                    # Update the sparse coefficients
+                    coefficientsSupOrig = np.array([coefficients[commonSupportAtom.position, commonSupportAtom.index] for commonSupportAtom in commonSupportAtoms], dtype=coefficients.dtype)
+                    for commonSupportAtom, coefficientSup in zip(commonSupportAtoms, coefficientsSup):
+                        commonSupportAtom.coefficient = coefficientSup
+                    coefficients = self._updateCoefficients(coefficients, commonSupportAtoms, replace=False)
+                
+                    # Update the residual by removing the contribution of the selected atoms
+                    residual, energyResidual = self._updateResidual(residual, energyResidual, commonSupportAtoms, D)
+                    
+                else:
+                    # No common support with other atoms
+                    commonSupportAtoms = [atom,]
+                    
+                    # Update the sparse coefficients
+                    coefficients = self._updateCoefficients(coefficients, commonSupportAtoms, replace=False)
+                    
+                    # Update the residual by removing the contribution of the selected atoms
+                    residual, energyResidual = self._updateResidual(residual, energyResidual, commonSupportAtoms, D)
+                
+                # Update the inner products
+                innerProducts = self._updateInnerProducts(innerProducts, residual, commonSupportAtoms, D)
+                
+                # Print information about current iteration
+                eps = 1e-20 
+                if energyResidual < eps:
+                    # Avoid numerical errors by setting to infinity
+                    snr = np.inf
+                else:
+                    snr = 10.0*np.log10(energySignal/energyResidual)
+ 
+                nbIterations += 1
+                
+                # Check stopping criteria (fast)
+                if nbNonzeroCoefs is not None and coefficients.nnz >= nbNonzeroCoefs:
+                    logger.debug('Tolerance for number of non-zero coefficients reached')
+                    converged = True
+                    break
+                if toleranceSnr is not None and snr >= toleranceSnr:
+                    logger.debug('Tolerance for signal-to-noise ratio reached')
+                    converged = True
+                    break
+                
+            # Check stopping criteria (slow)
+            residualScale = np.max(np.abs(residual))
+            if toleranceResidualScale is not None and residualScale <= toleranceResidualScale:
+                logger.debug('Tolerance for residual scale (absolute value) reached')
+                converged = True
+
+            if len(atoms) == 0:
+                # This means all coefficients are null
+                logger.warn('Selection returned empty set: considering convergence is achieved')
+                converged = True
+                
+            if stopCondition is not None:
+                if stopCondition(coefficients):
+                    logger.warn('Custom stop condition reached: considering convergence is achieved')
+                    converged = True
+                
+            nbSelections += 1
+
+            # Toggle offset switch
+            offset = not offset
+            
+            # Print information
+            logger.debug('SNR of %f dB achieved after %d selection iterations' % (snr, nbSelections))
+            logger.debug('Number of selection: %d' % (len(atoms)))
+            logger.debug('Number of non-zero coefficients: %d' % (coefficients.nnz))
+
+        if minCoefficients is not None:
+            # Clip small coefficients to zero
+            clippedCoefficients = scipy.sparse.lil_matrix((sequence.shape[0], D.shape[0]))
+            cx = coefficients.tocoo()
+            nullMask = np.where(np.abs(cx.data) >= minCoefficients)
+            clippedCoefficients[cx.row[nullMask],  cx.col[nullMask]] = cx.data[nullMask]
+            coefficients = clippedCoefficients
+
+        # Convert to compressed-column sparse matrix format
+        coefficients = coefficients.tocsc()
+        coefficients.eliminate_zeros()
+
+        if squeezeOutput:
+            residual = np.squeeze(residual, axis=1)
+
+        return coefficients, residual
+
 class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
 
-    def __init__(self):
-        pass
+    def __init__(self, useMPTK=False):
+        self.useMPTK = useMPTK
 
     def _forwardPhase(self, sequence, multilevelDict, toleranceSnr=None, nbBlocks=1, alpha=0.5, singletonWeight=0.5, stopCondition=None):
         
@@ -857,9 +1236,14 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
                 return condition
         
             # Instanciate a new coder for current level and encode
-            cmp = ConvolutionalMatchingPursuit()
-            levelCoder = ConvolutionalSparseCoder(D, cmp)
-            levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)#, stopCondition=stopInputSnrTolerance)
+            if self.useMPTK:
+                cmp = MptkConvolutionalMatchingPursuit()
+                levelCoder = ConvolutionalSparseCoder(D, cmp)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr)
+            else:
+                cmp = ConvolutionalMatchingPursuit()
+                levelCoder = ConvolutionalSparseCoder(D, cmp)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)#, stopCondition=stopInputSnrTolerance)
             
             input = levelCoefficients.todense()
             coefficients.append(levelCoefficients)
@@ -904,10 +1288,15 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
                 return condition
         
             # Instanciate a new coder for current level and encode
-            cmp = ConvolutionalMatchingPursuit()
-            levelCoder = ConvolutionalSparseCoder(D, cmp)
-            levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights, verbose=False)#, stopCondition=stopInputSnrTolerance)
-            
+            if self.useMPTK:
+                cmp = MptkConvolutionalMatchingPursuit()
+                levelCoder = ConvolutionalSparseCoder(D, cmp)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr)
+            else:
+                cmp = ConvolutionalMatchingPursuit()
+                levelCoder = ConvolutionalSparseCoder(D, cmp)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights, verbose=False)#, stopCondition=stopInputSnrTolerance)
+                
             input = levelCoefficients.todense()
             coefficients.append(levelCoefficients)
         
@@ -984,7 +1373,7 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
                 # Keep last-level only
                 if level < multilevelDict.getNbLevels() - 1:
                     if scipy.sparse.issparse(levelCoefficients):
-                        levelCoefficients = scipy.sparse.csr_matrix(levelCoefficients.shape, dtype=levelCoefficients.dtype)
+                        levelCoefficients = scipy.sparse.csc_matrix(levelCoefficients.shape, dtype=levelCoefficients.dtype)
                     else:
                         levelCoefficients = np.zeros_like(levelCoefficients)
                 

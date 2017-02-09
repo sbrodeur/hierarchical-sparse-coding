@@ -130,10 +130,10 @@ def visualizeDistributionRatios(weights, distributions):
 
     cumulatives = np.cumsum(distributions, axis=1)
 
-    fig = plt.figure(figsize=(8,4), facecolor='white', frameon=True)
+    fig = plt.figure(figsize=(6,3), facecolor='white', frameon=True)
     fig.canvas.set_window_title('Effect of weighting on the coefficient distribution')
-    fig.subplots_adjust(left=0.1, right=1.0, bottom=0.15, top=0.95,
-                        hspace=0.01, wspace=0.01)
+    #fig.subplots_adjust(left=0.1, right=1.0, bottom=0.15, top=0.95,
+    #                    hspace=0.01, wspace=0.01)
     ax = fig.add_subplot(111)
     
     bar_width = 0.75
@@ -160,10 +160,12 @@ def visualizeDistributionRatios(weights, distributions):
     ax.set_ylim([0.0, 1.1])
     
     # Add legend
-    box = ax.get_position()
-    ax.set_position([box.x0, box.y0, box.width * 0.83, box.height])
-    ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize='small')
-
+    #box = ax.get_position()
+    #ax.set_position([box.x0, box.y0, box.width * 0.83, box.height])
+    #ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize='small')
+    ax.legend(fontsize='small')
+    
+    fig.tight_layout()
     return fig
     
 def visualizeInformationRates(weights, sparseInfoRates, showAsBars=False):
