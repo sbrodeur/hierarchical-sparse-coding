@@ -126,10 +126,10 @@ def convolve1d(sequence, filters, padding='valid'):
         # Pad sequences
         if np.mod(width, 2) == 0:
             # Even filter size
-            sequence = np.pad(sequence, [(width/2-1, width/2), (0,0)], mode='reflect')
+            sequence = np.pad(sequence, [(width/2-1, width/2), (0,0)], mode='constant')
         else:
             # Odd filter size
-            sequence = np.pad(sequence, [(width/2, width/2), (0,0)], mode='reflect')
+            sequence = np.pad(sequence, [(width/2, width/2), (0,0)], mode='constant')
     else:
         raise Exception('Padding not supported: %s' % (padding))
 
@@ -141,11 +141,13 @@ def convolve1d(sequence, filters, padding='valid'):
 
     # TODO: when to use scipy.signal.fftconvolve?
     # convolve fiters by the signal
-
+#     c = [scipy.signal.fftconvolve(sequence, filter[::-1, ::-1], mode='valid') for filter in filters]
+#     c = np.squeeze(np.stack(c, axis=-1), axis=1)
+    
     # Create a strided view of the sequence
     w = as_strided(sequence, shape=((sequence.shape[0] - width + 1), sequence.shape[1], width),
                   strides=(sequence.strides[0], sequence.strides[1], sequence.strides[0])) 
-    
+     
     # w has shape [length, features, width]
     nbTotalFeatureDim = np.prod(filters.shape[1:])
     c = np.dot(w.reshape((w.shape[0],nbTotalFeatureDim)),
@@ -164,10 +166,10 @@ def convolve1d_batch(sequences, filters, padding='valid'):
         # Pad sequences
         if np.mod(width, 2) == 0:
             # Even filter size
-            sequences = np.pad(sequences, [(0,0), (width/2-1, width/2), (0,0)], mode='reflect')
+            sequences = np.pad(sequences, [(0,0), (width/2-1, width/2), (0,0)], mode='constant')
         else:
             # Odd filter size
-            sequences = np.pad(sequences, [(0,0), (width/2, width/2), (0,0)], mode='reflect')
+            sequences = np.pad(sequences, [(0,0), (width/2, width/2), (0,0)], mode='constant')
     else:
         raise Exception('Padding not supported: %s' % (padding))
     
@@ -667,7 +669,7 @@ class Atom(object):
         return startIdx, endIdx
 
     def __str__(self):
-        return 'Atom no.%d of length %d at position %d, c = %f' % (self.index, self.length, self.position, self.coefficient)
+        return 'Atom no.%d of length %d at position %d, c = %4.10f' % (self.index, self.length, self.position, self.coefficient)
 
     def __repr__(self):
         return self.__str__()
@@ -685,7 +687,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
 
     def _updateDemo(self, atom, D, residual):
         
-        logger.info('Matching pursuit iteration %d: raw event is (t = %d, f = %d, c = %f)' % (nbIterations, atom.position, atom.index, atom.coefficient))
+        logger.info('Matching pursuit: raw event is (t = %d, f = %d, c = %f)' % (atom.position, atom.index, atom.coefficient))
                     
         plt.clf()
         ax1 = self.fig.add_subplot(211)
@@ -697,9 +699,9 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         ax1.plot(np.ones_like(basis) * basisTime[:,np.newaxis], basis, '-r', linewidth=1)
         ax1.set_title('Coefficient = %f' % (atom.coefficient))
         ax1.axvline(x=atom.position, color='gray', linestyle='--')
-        ax1.set_xlim((atom.position - 2 * D.shape[1], t + 2 * D.shape[1]))
+        ax1.set_xlim((atom.position - 2 * D.shape[1], atom.position + 2 * D.shape[1]))
         
-        ax2 = fig.add_subplot(212)
+        ax2 = self.fig.add_subplot(212)
         ax2.plot(residual, '-k', linewidth=2)
         ax2.axvline(x=atom.position, color='gray', linestyle='--')
         
@@ -764,13 +766,13 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
                 nbInterferences = len(t) - len(indices)
                 t, fIdx, coefficients = t[indices], fIdx[indices], coefficients[indices]
                 logger.debug('Number of interfering activations removed during selection: %d' % (nbInterferences))
-                
+            
             # Sort activations by absolute amplitude of coefficients
             indices = np.argsort(np.abs(coefficients))[::-1]
             nbNulls = len(t) - len(indices)
-            t, fIdx = t[indices], fIdx[indices]
+            t, fIdx, coefficients = t[indices], fIdx[indices], coefficients[indices]
             logger.debug('Number of null activations removed during selection: %d' % (nbNulls))
-        
+            
         else:
             # Find maximum across the whole activations
             t, fIdx = np.unravel_index(np.argmax(np.abs(scores)), scores.shape)
@@ -788,7 +790,6 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         
         # Create the list of atom instances
         atoms = [Atom(p, f, c, filterWidth) for p, f, c in zip(t, fIdx, coefficients)]
-        
         return atoms
         
     def _updateCoefficients(self, coefficients, atoms, replace=True):
@@ -803,7 +804,9 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             
         return coefficients
     
-    def _updateResidual(self, residual, energyResidual, atoms, D):
+    def _updateResidual(self, residual, energyResidual, atoms, D, eps=1e-16):
+
+        residualCopy = np.copy(residual)
 
         energyLoss = 0.0
         for atom in atoms:
@@ -814,9 +817,19 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             localEnergyAfter = np.sum(np.square(peek(residual, atom.length, atom.position)))
             energyLoss += (localEnergyBefore - localEnergyAfter)
         
-        if energyLoss < 0.0:
-           logger.warn('Residual energy increased by %f' % (-energyLoss))
-        #assert energyLoss >= 0.0
+        if energyLoss < 0.0 and np.abs(energyLoss) > eps:
+            logger.warn('Residual energy (%f) increased by %4.18f' % (energyResidual, -energyLoss))
+            
+#             plt.ioff()
+#             for atom in atoms:
+#                 self.fig = plt.figure(figsize=(12,8), facecolor='white', frameon=True)
+#                 self._updateDemo(atom, D, residualCopy)
+#                 plt.show()
+                
+            if self.verbose:
+                plt.ioff()
+                plt.show()
+            #assert energyLoss >= 0.0
         energyResidual -= energyLoss
         
         return residual, energyResidual
@@ -856,9 +869,11 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         
         return innerProducts
         
-    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, weights=None, stopCondition=None):
+    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.0, minCoefficients=1e-16, weights=None, stopCondition=None):
         assert sequence.ndim == 1 or sequence.ndim == 2
         assert D.ndim == 2 or D.ndim == 3
+
+        eps = np.finfo(D.dtype).eps
 
         if sequence.ndim == 1:
             squeezeOutput = True
@@ -892,7 +907,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             # Adaptive selection: rejection if coefficients are less that alpha times the maximum.
             nullCoeffThres = alpha * np.max(np.abs(innerProducts))
             if minCoefficients is not None:
-                nullCoeffThres = min(minCoefficients, nullCoeffThres)
+                nullCoeffThres = max(minCoefficients, nullCoeffThres)
             atoms = self._selectBestAtoms(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=nullCoeffThres, weights=weights)
             for atom in atoms:
         
@@ -907,24 +922,26 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
                     nnz += 1
                 
                 # Update the sparse coefficients
-                coefficients = self._updateCoefficients(coefficients, atoms, replace=False)
+                coefficients = self._updateCoefficients(coefficients, [atom,], replace=False)
                 
                 # Update the residual by removing the contribution of the selected atoms
-                residual, energyResidual = self._updateResidual(residual, energyResidual, atoms, D)
+                residual, energyResidual = self._updateResidual(residual, energyResidual, [atom,], D)
                 
                 # Update the inner products
-                innerProducts = self._updateInnerProducts(innerProducts, residual, atoms, D)
+                innerProducts = self._updateInnerProducts(innerProducts, residual, [atom,], D)
+                
+                nbIterations += 1
                 
                 # Print information about current iteration
-                eps = 1e-20 
                 if energyResidual < eps:
                     # Avoid numerical errors by setting to infinity
                     snr = np.inf
+                    logger.debug('Perfect reconstruction reached: considering convergence is achieved')
+                    converged = True
+                    break
                 else:
                     snr = 10.0*np.log10(energySignal/energyResidual)
                         
-                nbIterations += 1
-                
                 # Check stopping criteria (fast)
                 if nbNonzeroCoefs is not None and nnz >= nbNonzeroCoefs:
                     logger.debug('Tolerance for number of non-zero coefficients reached')
@@ -979,6 +996,9 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
 
         return coefficients, residual
 
+# TODO: implement interference adaptation, see:
+# http://ieeexplore.ieee.org/document/5352303/
+
 class LoCOMP(ConvolutionalMatchingPursuit):
     """
     Low-complexity Orthogonal Matching Pursuit (LoCOMP)
@@ -989,8 +1009,8 @@ class LoCOMP(ConvolutionalMatchingPursuit):
     https://www.mathworks.com/help/wavelet/ug/matching-pursuit-algorithms.html
     """
     
-    def __init__(self):
-        super(LoCOMP, self).__init__()
+    def __init__(self, verbose=False):
+        super(LoCOMP, self).__init__(verbose)
     
     def _precomputeGramMatrixForShifts(self, D):
         """
@@ -1024,7 +1044,9 @@ class LoCOMP(ConvolutionalMatchingPursuit):
         else:
             endIdx = min(endIdx + atomLength/2, sequenceLength)
         subspace = coefficients[startIdx:endIdx+1,:].tocoo()
-        atoms = [Atom(startIdx+position, index, coefficient, atomLength) for position, index, coefficient in zip(subspace.row, subspace.col, subspace.data)]
+        
+        # NOTE: make sure we dont add the reference atom, if it already exists in the set of coefficient
+        atoms = [Atom(startIdx+position, index, coefficient, atomLength) for position, index, coefficient in zip(subspace.row, subspace.col, subspace.data) if position != atom.position and index != atom.index]
         return atoms
     
     def _getDictionaryFromSupportAtoms(self, sequence, atoms, D):
@@ -1046,13 +1068,14 @@ class LoCOMP(ConvolutionalMatchingPursuit):
             Dsup.append(signal)
         Dsup = np.stack(Dsup)
         sequenceSup = sequence[minStartIdx:maxEndIdx+1]
-        assert np.array_equal(Dsup.shape[1:], sequenceSup.shape)
         
         return Dsup, sequenceSup
     
-    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.0, minCoefficients=1e-15, weights=None, stopCondition=None, G=None):
+    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.0, minCoefficients=1e-16, weights=None, stopCondition=None, G=None):
         assert sequence.ndim == 1 or sequence.ndim == 2
         assert D.ndim == 2 or D.ndim == 3
+
+        eps = np.finfo(D.dtype).eps
 
         if sequence.ndim == 1:
             squeezeOutput = True
@@ -1091,10 +1114,17 @@ class LoCOMP(ConvolutionalMatchingPursuit):
             atoms = self._selectBestAtoms(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=nullCoeffThres, weights=weights)
             for atom in atoms:
         
+                if self.verbose:
+                    self._updateDemo(atom, D, residual)
+        
                 if coefficients[atom.position, atom.index] != 0.0:
                     logger.warn('Redundant atom selected: %s' % (str(atom)))
-                #assert coefficients[atom.position, atom.index] == 0.0
-        
+                    if self.verbose:
+                        plt.ioff()
+                        plt.show()
+                    #assert coefficients[atom.position, atom.index] == 0.0
+                    
+                lastEnergyResidual = energyResidual
                 commonSupportAtoms = self._findCommonSupportAtoms(atom, coefficients, D)
                 if len(commonSupportAtoms) > 0:
                     # Common support with other atoms, so calculate the orthogonal projection
@@ -1107,6 +1137,14 @@ class LoCOMP(ConvolutionalMatchingPursuit):
                     #Gsup = np.dot(np.linalg.inv(np.dot(DsupF, DsupF.T)), DsupF)
                     Gsup = np.linalg.pinv(DsupF).T
                     coefficientsSup = np.dot(Gsup, residualSup.flatten()).flatten()
+                    
+                    innerProductsSup = convolve1d(residualSup, D, padding='same')
+#                     print innerProductsSup.shape, Dsup.shape
+#                     for i, commonSupportAtom in enumerate(commonSupportAtoms):
+#                         print innerProducts[commonSupportAtom.position, commonSupportAtom.index], np.dot(DsupF[i], residualSup.flatten())
+                    #print Dsup[0].flatten()
+                    #print D[commonSupportAtoms[0].index].flatten()
+                    #print coefficientsSup
                 
                     # Update the sparse coefficients
                     coefficientsSupOrig = np.array([coefficients[commonSupportAtom.position, commonSupportAtom.index] for commonSupportAtom in commonSupportAtoms], dtype=coefficients.dtype)
@@ -1115,8 +1153,7 @@ class LoCOMP(ConvolutionalMatchingPursuit):
                     coefficients = self._updateCoefficients(coefficients, commonSupportAtoms, replace=False)
                 
                     # Update the residual by removing the contribution of the selected atoms
-                    residual, energyResidual = self._updateResidual(residual, energyResidual, commonSupportAtoms, D)
-                    
+                    residual, energyResidual = self._updateResidual(residual, energyResidual, commonSupportAtoms, D, eps)
                 else:
                     # No common support with other atoms
                     commonSupportAtoms = [atom,]
@@ -1125,21 +1162,23 @@ class LoCOMP(ConvolutionalMatchingPursuit):
                     coefficients = self._updateCoefficients(coefficients, commonSupportAtoms, replace=False)
                     
                     # Update the residual by removing the contribution of the selected atoms
-                    residual, energyResidual = self._updateResidual(residual, energyResidual, commonSupportAtoms, D)
+                    residual, energyResidual = self._updateResidual(residual, energyResidual, commonSupportAtoms, D, eps)
                 
                 # Update the inner products
                 innerProducts = self._updateInnerProducts(innerProducts, residual, commonSupportAtoms, D)
                 
+                nbIterations += 1
+                
                 # Print information about current iteration
-                eps = 1e-20 
                 if energyResidual < eps:
                     # Avoid numerical errors by setting to infinity
                     snr = np.inf
+                    logger.debug('Perfect reconstruction reached: considering convergence is achieved')
+                    converged = True
+                    break
                 else:
                     snr = 10.0*np.log10(energySignal/energyResidual)
  
-                nbIterations += 1
-                
                 # Check stopping criteria (fast)
                 if nbNonzeroCoefs is not None and coefficients.nnz >= nbNonzeroCoefs:
                     logger.debug('Tolerance for number of non-zero coefficients reached')
@@ -1149,6 +1188,13 @@ class LoCOMP(ConvolutionalMatchingPursuit):
                     logger.debug('Tolerance for signal-to-noise ratio reached')
                     converged = True
                     break
+                
+                deltaEnergyResidual = np.abs(lastEnergyResidual - energyResidual)
+                if deltaEnergyResidual < eps:
+                    logger.warn('Residual energy is no more reduced: considering convergence is achieved')
+                    converged = True
+                    break
+                lastEnergyResidual = energyResidual
                 
             # Check stopping criteria (slow)
             residualScale = np.max(np.abs(residual))
@@ -1195,8 +1241,8 @@ class LoCOMP(ConvolutionalMatchingPursuit):
 
 class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
 
-    def __init__(self, useMPTK=False):
-        self.useMPTK = useMPTK
+    def __init__(self, method='locomp'):
+        self.method = method
 
     def _forwardPhase(self, sequence, multilevelDict, toleranceSnr=None, nbBlocks=1, alpha=0.5, singletonWeight=0.5, stopCondition=None):
         
@@ -1236,14 +1282,24 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
                 return condition
         
             # Instanciate a new coder for current level and encode
-            if self.useMPTK:
-                cmp = MptkConvolutionalMatchingPursuit()
+            if self.method == 'mptk-mp':
+                cmp = MptkConvolutionalMatchingPursuit(method='mp')
                 levelCoder = ConvolutionalSparseCoder(D, cmp)
                 levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr)
-            else:
+            elif self.method == 'mptk-cmp':
+                cmp = MptkConvolutionalMatchingPursuit(method='cmp')
+                levelCoder = ConvolutionalSparseCoder(D, cmp)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr)
+            elif self.method == 'locomp':
+                cmp = LoCOMP()
+                levelCoder = ConvolutionalSparseCoder(D, cmp)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)
+            elif self.method == 'cmp':
                 cmp = ConvolutionalMatchingPursuit()
                 levelCoder = ConvolutionalSparseCoder(D, cmp)
-                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)#, stopCondition=stopInputSnrTolerance)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)
+            else:
+                raise Exception('Unsupported sparse coding method: %s' % (self.method))
             
             input = levelCoefficients.todense()
             coefficients.append(levelCoefficients)
@@ -1288,15 +1344,25 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
                 return condition
         
             # Instanciate a new coder for current level and encode
-            if self.useMPTK:
-                cmp = MptkConvolutionalMatchingPursuit()
+            if self.method == 'mptk-mp':
+                cmp = MptkConvolutionalMatchingPursuit(method='mp')
                 levelCoder = ConvolutionalSparseCoder(D, cmp)
                 levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr)
-            else:
+            elif self.method == 'mptk-cmp':
+                cmp = MptkConvolutionalMatchingPursuit(method='cmp')
+                levelCoder = ConvolutionalSparseCoder(D, cmp)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr)
+            elif self.method == 'locomp':
+                cmp = LoCOMP()
+                levelCoder = ConvolutionalSparseCoder(D, cmp)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)
+            elif self.method == 'cmp':
                 cmp = ConvolutionalMatchingPursuit()
                 levelCoder = ConvolutionalSparseCoder(D, cmp)
-                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights, verbose=False)#, stopCondition=stopInputSnrTolerance)
-                
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)
+            else:
+                raise Exception('Unsupported sparse coding method: %s' % (self.method))
+            
             input = levelCoefficients.todense()
             coefficients.append(levelCoefficients)
         

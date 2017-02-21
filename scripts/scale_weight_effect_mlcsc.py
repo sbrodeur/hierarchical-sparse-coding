@@ -73,7 +73,7 @@ def learnMultilevelDictionary(multilevelDictRef, trainSignal, testSignal, weight
         for level in range(multilevelDictRef.getNbLevels()):
             
             multilevelDict = multilevelDictRef.upToLevel(level)
-            hcmp = HierarchicalConvolutionalMatchingPursuit(useMPTK=True)
+            hcmp = HierarchicalConvolutionalMatchingPursuit(method='cmp')
             hcsc = HierarchicalConvolutionalSparseCoder(multilevelDict, approximator=hcmp)
             
             # NOTE: for all levels but the last one, return the coefficients from the last level only, without redistributing the activations to lower levels
@@ -118,7 +118,7 @@ if __name__ == "__main__":
     np.random.seed(42)
 
     # NOTE: set so that any numerical error will raise an exception
-    np.seterr(all='raise')
+    #np.seterr(all='raise')
 
     parser = argparse.ArgumentParser()
     parser.add_argument("-w", "--overwrite-results", help="force to overwrite results",
@@ -154,15 +154,15 @@ if __name__ == "__main__":
     logger.info('Number of events in dataset (testing): %d' % (len(testEvents)))
 
     # Values of weights to evaluate
-    #weights = np.array([0.9, 1.0, 2.0])
-    weights = [1.0]
+    weights = np.array([0.9, 1.0, 2.0])
+    #weights = [1.0]
     def f(w):
         return learnMultilevelDictionary(multilevelDictRef, trainSignal, testSignal, w, resultsDir=outputResultPath, overwrite=args.overwrite_results)
     
     # Use all available cores on the CPU
-    #p = Pool()
-    #p.map(f, weights)
-    [f(w) for w in weights]
+    p = Pool()
+    p.map(f, weights)
+    #[f(w) for w in weights]
     
     # Load results from files
     results = loadResults(outputResultPath)
@@ -192,13 +192,24 @@ if __name__ == "__main__":
     # Lower bound
     ax.plot(optimalScales, optimalInfoRates, linestyle='-', color='k', linewidth=3, label='Lower bound')
         
+    ax2 = ax.twiny()
+    labels = ['L%d' % (i+1) for i in range(multilevelDictRef.getNbLevels())]
+    scales = multilevelDictRef.scales
+    ax2.set_xlim(ax.get_xlim())
+    ax2.set_xticks(scales)
+    ax2.set_xticklabels(labels, rotation='horizontal')
+    ax2.set_xlabel('Maximum level')
+        
     #ax.set_title('Information rate distribution')
-    ax.set_xlabel('Maximum scale')
+    ax.set_xlabel('Maximum input-level scale')
     ax.set_ylabel('Information rate [bit/sample]')
-    ax.legend()#fontsize='small'
+    axbox = ax.get_position()
+    x_value = .12
+    y_value = .40
+    ax.legend(loc = (axbox.x0 + x_value, axbox.y0 + y_value))#fontsize='small'
     
     fig.tight_layout()
-    fig.savefig(os.path.join(outputResultPath, 'optimality.eps'), format='eps', dpi=1200)
+    fig.savefig(os.path.join(outputResultPath, 'optimality-complex.eps'), format='eps', dpi=1200)
     
     weights = []
     distributions = []
@@ -237,13 +248,13 @@ if __name__ == "__main__":
     # Distribution analysis
     logger.info('Analysing distribution across levels...')
     fig = visualizeDistributionRatios(weights, distributions)
-    fig.savefig(os.path.join(outputResultPath, 'distribution-effect.eps'), format='eps', dpi=1200)
+    fig.savefig(os.path.join(outputResultPath, 'distribution-effect-complex.eps'), format='eps', dpi=1200)
     
     # Energy analysis
     logger.info('Analysing energies...')
     signalEnergy = np.sum(np.square(testSignal))
     fig = visualizeEnergies(weights, energies, showAsBars=True, signalEnergy=signalEnergy)
-    fig.savefig(os.path.join(outputResultPath, 'energy-effect.eps'), format='eps', dpi=1200)
+    fig.savefig(os.path.join(outputResultPath, 'energy-effect-complex.eps'), format='eps', dpi=1200)
     
     logger.info('All done.')
     plt.show()

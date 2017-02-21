@@ -184,17 +184,22 @@ class TestLoCOMP(unittest.TestCase):
         self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
         
         nbNonzeroCoefs = 4
-        for dsize in [1,2,3]:
+        for dsize in [1,2,3,9]:
             for dwidth in [3,5,6]:
                 cmp = LoCOMP()
                 sequence = np.random.random(size=(16,))
                 D = normalize(np.random.random(size=(dsize,dwidth)), axis=1)
                 coefficients, residual = cmp.computeCoefficients(sequence, D, nbNonzeroCoefs=nbNonzeroCoefs)
-                print coefficients.nnz, nbNonzeroCoefs
                 self.assertTrue(coefficients.nnz == nbNonzeroCoefs)
                 self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
         
-       
+        # 1D sequence with blocking
+        for nbBlocks in [1,2,8]:
+            cmp = LoCOMP()
+            sequence = np.random.random(size=(256,))
+            D = normalize(np.random.random(size=(16,15)), axis=1)
+            coefficients, residual = cmp.computeCoefficients(sequence, D, nbBlocks=nbBlocks)
+            self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
         
     def test_computeCoefficients_2d(self):
         
@@ -208,6 +213,21 @@ class TestLoCOMP(unittest.TestCase):
         self.assertTrue(coefficients.nnz == nbNonzeroCoefs)
         self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
 
+        for nbFeatures in [2,5,7,15]:
+            cmp = LoCOMP()
+            sequence = np.random.random(size=(64,nbFeatures))
+            D = normalize(np.random.random(size=(16,15,nbFeatures)), axis=(1,2))
+            coefficients, residual = cmp.computeCoefficients(sequence, D, nbNonzeroCoefs=nbNonzeroCoefs)
+            self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
+
+        # 2D sequence with blocking
+        for nbBlocks in [1,2,8]:
+            cmp = LoCOMP()
+            sequence = np.random.random(size=(256,nbFeatures))
+            D = normalize(np.random.random(size=(16,15,nbFeatures)), axis=(1,2))
+            coefficients, residual = cmp.computeCoefficients(sequence, D, nbBlocks=nbBlocks)
+            self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
+   
 
 class TestConvolutionalMatchingPursuit(unittest.TestCase):
 
@@ -369,6 +389,26 @@ class TestConvolutionalSparseCoder(unittest.TestCase):
         nbComponents = 4
         filterWidth = 32
         D = normalize(np.random.random(size=(nbComponents, filterWidth)), axis=1)
+        csc = ConvolutionalSparseCoder(D, approximator=cmp)
+        
+        coefficientsRef = scipy.sparse.coo_matrix(([1.0,1.0,0.5,1.0,0.75,2.0], 
+                                                ([32,48,64,96,128,192], [0,3,1,0,2,2])),
+                                               shape = (256,nbComponents))
+        sequence = reconstructSignal(coefficientsRef, D)
+        
+        coefficients, residual = csc.encode(sequence, minCoefficients=1e-10)
+        self.assertTrue(coefficients.nnz == coefficientsRef.nnz)
+        self.assertTrue(np.allclose(coefficients.toarray(), coefficientsRef.toarray(), atol=1e-1))
+        self.assertTrue(np.allclose(residual, np.zeros_like(residual), atol=1e-6))
+            
+    def test_encode_2d_optimality_locomp(self):
+        
+        # Toy problem to solve
+        cmp = LoCOMP()
+        nbComponents = 4
+        filterWidth = 32
+        nbFeatures = 7
+        D = normalize(np.random.random(size=(nbComponents, filterWidth, nbFeatures)), axis=(1,2))
         csc = ConvolutionalSparseCoder(D, approximator=cmp)
         
         coefficientsRef = scipy.sparse.coo_matrix(([1.0,1.0,0.5,1.0,0.75,2.0], 
@@ -774,17 +814,20 @@ class TestHierarchicalConvolutionalMatchingPursuit(unittest.TestCase):
         mldg = MultilevelDictionaryGenerator()
         multilevelDict = mldg.generate(scales=[16,32,64], counts=[16,24,48], decompositionSize=4, multilevelDecomposition=False, maxNbPatternsConsecutiveRejected=10)
         
-        nbSamples = 4096
+        nbSamples = 1024
         rates = [1e-3, 1e-3, 1e-3]
         generator = SignalGenerator(multilevelDict, rates)
         events, rates = generator.generateEvents(nbSamples, minimumCompressionRatio=0.50)
         signal = generator.generateSignalFromEvents(events, nbSamples)
         
-        hcmp = HierarchicalConvolutionalMatchingPursuit()
-        coefficients, residual = hcmp.computeCoefficients(signal, multilevelDict.withSingletonBases(), toleranceSnr=[20,10,10], nbBlocks=1, alpha=0.1, singletonWeight=0.9)
-        self.assertTrue(len(coefficients) == 3)
-        self.assertTrue(np.array_equal(residual.shape, signal.shape))
-        self.assertTrue(np.max(np.abs(residual)) < np.max(np.abs(signal)))
+        # NOTE: methods 'mptk-cmp' and 'mptk-mp' do not converge quickly for this test 
+        for method in ['cmp', 'locomp']:
+            
+            hcmp = HierarchicalConvolutionalMatchingPursuit(method)
+            coefficients, residual = hcmp.computeCoefficients(signal, multilevelDict.withSingletonBases(), toleranceSnr=[20,10,10], nbBlocks=1, alpha=0.1, singletonWeight=0.9)
+            self.assertTrue(len(coefficients) == 3)
+            self.assertTrue(np.array_equal(residual.shape, signal.shape))
+            self.assertTrue(np.max(np.abs(residual)) < np.max(np.abs(signal)))
  
 class TestHierarchicalConvolutionalSparseCoder(unittest.TestCase):
  
@@ -793,31 +836,26 @@ class TestHierarchicalConvolutionalSparseCoder(unittest.TestCase):
         mldg = MultilevelDictionaryGenerator()
         multilevelDict = mldg.generate(scales=[16,32,64], counts=[16,24,48], decompositionSize=4, multilevelDecomposition=False, maxNbPatternsConsecutiveRejected=10)
         
-        nbSamples = 4096
+        nbSamples = 1024
         rates = [1e-3, 1e-3, 1e-3]
         generator = SignalGenerator(multilevelDict, rates)
         events, rates = generator.generateEvents(nbSamples, minimumCompressionRatio=0.50)
         signal = generator.generateSignalFromEvents(events, nbSamples)
         
-        hcmp = HierarchicalConvolutionalMatchingPursuit()
-        hsc = HierarchicalConvolutionalSparseCoder(multilevelDict, hcmp)
-        coefficients, residual = hsc.encode(signal, toleranceSnr=[20,10,10], nbBlocks=1, alpha=0.1, singletonWeight=0.9)
-        self.assertTrue(len(coefficients) == 3)
-        self.assertTrue(np.array_equal(residual.shape, signal.shape))
-        self.assertTrue(np.max(np.abs(residual)) < np.max(np.abs(signal)))
+        # NOTE: methods 'mptk-cmp' and 'mptk-mp' do not converge quickly for this test 
+        for method in ['cmp', 'locomp']:
         
-        reconstruction = hsc.reconstruct(coefficients)
-        self.assertTrue(np.array_equal(signal.shape, reconstruction.shape))
+            hcmp = HierarchicalConvolutionalMatchingPursuit(method)
+            hsc = HierarchicalConvolutionalSparseCoder(multilevelDict, hcmp)
+            coefficients, residual = hsc.encode(signal, toleranceSnr=[20,10,10], nbBlocks=1, alpha=0.1, singletonWeight=0.9)
+            self.assertTrue(len(coefficients) == 3)
+            self.assertTrue(np.array_equal(residual.shape, signal.shape))
+            self.assertTrue(np.max(np.abs(residual)) < np.max(np.abs(signal)))
+            
+            reconstruction = hsc.reconstruct(coefficients)
+            self.assertTrue(np.array_equal(signal.shape, reconstruction.shape))
         
 if __name__ == '__main__':
     logging.basicConfig(level=logging.WARN)
     np.seterr(all='raise')
     unittest.main()
-
-#     logging.basicConfig(level=logging.DEBUG)
-#     np.random.seed(42)
-#     suite = unittest.TestSuite()
-#     suite.addTest(TestLoCOMP('test_computeCoefficients_1d'))
-#     suite.addTest(TestLoCOMP('test_computeCoefficients_2d'))
-#     suite.addTest(TestConvolutionalSparseCoder('test_encode_1d_optimality_locomp'))
-#     unittest.TextTestRunner().run(suite)
