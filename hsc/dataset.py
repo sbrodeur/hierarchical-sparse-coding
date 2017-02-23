@@ -33,6 +33,8 @@ import cPickle as pickle
 import collections
 import logging
 import numpy as np
+import scipy
+import scipy.sparse
 import matplotlib
 import matplotlib.pyplot as plt
 
@@ -681,7 +683,7 @@ class SignalGenerator(object):
         self.multilevelDict = multilevelDict
         self.rates = rates
 
-    def _estimateOptimalRates(self, minimumCompressionRatio):
+    def _estimateOptimalRates(self, minimumCompressionRatio, nbSamples):
         
         dtype = self.multilevelDict.dictionaries[0].dtype
         c_bits = calculateBitForDatatype(dtype)
@@ -689,7 +691,7 @@ class SignalGenerator(object):
         factorIdx = 0
         while True:
             scaledRates = np.copy(self.rates) * factors[factorIdx]
-            avgInfoRates = calculateMultilevelInformationRates(self.multilevelDict, scaledRates, dtype=dtype)
+            avgInfoRates = calculateMultilevelInformationRates(self.multilevelDict, scaledRates, nbSamples, dtype=dtype)
             if avgInfoRates[0] <= c_bits * minimumCompressionRatio:
                 # Valid rates found
                 break
@@ -705,7 +707,7 @@ class SignalGenerator(object):
     def generateEvents(self, nbSamples=1000, minimumCompressionRatio=None):
         
         if minimumCompressionRatio is not None:
-            rates = self._estimateOptimalRates(minimumCompressionRatio)
+            rates = self._estimateOptimalRates(minimumCompressionRatio, nbSamples)
         else:
             rates = self.rates
         
@@ -792,6 +794,19 @@ class SignalGenerator(object):
             times = np.unique(np.floor(times).astype(np.int))
         
         return times
+    
+def convertEventsToSparseMatrices(events, counts, sequenceLength):
+    
+    tIndices = np.array([event[0] for event in events], dtype=np.int)
+    levels = np.array([event[1] for event in events], dtype=np.int)
+    fIndices = np.array([event[2] for event in events], dtype=np.int)
+    cValues = np.array([event[3] for event in events], dtype=events.dtype[-1])
+    
+    coefficients = []
+    for level, count in enumerate(counts):
+        mask = np.where(levels == level)
+        coefficients.append(scipy.sparse.coo_matrix((cValues[mask], (tIndices[mask], fIndices[mask])), shape=(sequenceLength, count)))
+    return coefficients
     
 def addSingletonBases(dictionaries):
     assert len(dictionaries) > 1

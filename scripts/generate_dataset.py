@@ -32,6 +32,7 @@ import logging
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
+matplotlib.rcParams.update({"text.usetex": True,})
 import matplotlib.pyplot as plt
 
 from hsc.dataset import MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator
@@ -77,14 +78,14 @@ if __name__ == "__main__":
         fig.savefig(os.path.join(cdir, 'dict-l%d.eps' % (l)), format='eps', dpi=1200)
     
     # Generate training and testing datasets
-    # NOTE: find the optimal rates to achieve about 20% of the raw bitrate when reducing to the first level
-    minimumCompressionRatio = 0.20
-    rates = 0.0005 * np.ones_like(scales)
+    # NOTE: find the optimal rates to achieve about 25% of the raw bitrate when reducing to the first level
+    minimumCompressionRatio = 0.25
+    ratesInit = 0.0005 * np.ones_like(scales)
     for datasetName, nbSamples in [('train', int(1e7)), ('test', int(1e5))]:
     
         # Generate events and signal using the multi-level dictionary
         logger.info('Generating events and raw temporal signal for dataset %s...' % (datasetName))
-        generator = SignalGenerator(multilevelDict, rates)
+        generator = SignalGenerator(multilevelDict, ratesInit)
         events, rates = generator.generateEvents(nbSamples, minimumCompressionRatio)
         signal = generator.generateSignalFromEvents(events, nbSamples=nbSamples)
         logger.info('Number of generated events: %d , in %d samples' % (len(events), len(signal)))

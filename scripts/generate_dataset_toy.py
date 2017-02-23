@@ -32,6 +32,7 @@ import logging
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
+matplotlib.rcParams.update({"text.usetex": True,})
 import matplotlib.pyplot as plt
 
 from hsc.dataset import MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator

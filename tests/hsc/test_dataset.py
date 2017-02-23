@@ -36,7 +36,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 
-from hsc.dataset import Perlin, MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator, scalesToWindowSizes
+from hsc.dataset import Perlin, MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator, scalesToWindowSizes, convertEventsToSparseMatrices
 
 class TestPerlin(unittest.TestCase):
 
@@ -328,6 +328,27 @@ class TestSignalGenerator(unittest.TestCase):
           
 class TestFunctions(unittest.TestCase):
     
+    def test_convertEventsToSparseMatrices(self):
+        
+        mldg = MultilevelDictionaryGenerator()
+        
+        nbSamples = int(1e4)
+        rate = 0.1
+        multilevelDict = mldg.generate(scales=[31,63], counts=[4, 7], maxNbPatternsConsecutiveRejected=100)
+        generator = SignalGenerator(multilevelDict, rates=[rate, rate])
+        events, _ = generator.generateEvents(nbSamples, minimumCompressionRatio=0.5)
+        coefficients = convertEventsToSparseMatrices(events, multilevelDict.counts, nbSamples)
+        self.assertTrue(np.array_equal(coefficients[0].shape, [nbSamples,4]))
+        self.assertTrue(np.array_equal(coefficients[1].shape, [nbSamples,7]))
+        self.assertTrue(int(np.sum([c.nnz for c in coefficients])) == len(events))
+        eventLevels = np.array([event[1] for event in events], dtype=np.int)
+        for level in range(multilevelDict.getNbLevels()):
+            self.assertTrue(coefficients[level].nnz == np.count_nonzero(eventLevels == level))
+            
+        coefficients = [c.tocsr() for c in coefficients]
+        for tIdx,level,fIdx,c in events:
+            self.assertTrue(coefficients[level][tIdx,fIdx] == c)
+
     def test_scalesToWindowSizes(self):
         scales = [3,5,9]
         widths = scalesToWindowSizes(scales)

@@ -38,13 +38,16 @@ import collections
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
+matplotlib.rcParams.update({"text.usetex": True,})
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 
 from multiprocessing import Pool
 
-from hsc.dataset import MultilevelDictionary, scalesToWindowSizes, addSingletonBases
+from hsc.dataset import MultilevelDictionary, scalesToWindowSizes, addSingletonBases, convertEventsToSparseMatrices
 from hsc.modeling import HierarchicalConvolutionalMatchingPursuit, HierarchicalConvolutionalSparseCoder, ConvolutionalDictionaryLearner
-from hsc.analysis import calculateMultilevelInformationRates, calculateEmpiricalInformationRates, calculateDistributionRatios, visualizeDistributionRatios, visualizeInformationRates, visualizeEnergies, visualizeInformationRatesOptimality
+from hsc.analysis import calculateMultilevelInformationRates, calculateEmpiricalMultilevelInformationRates, calculateEmpiricalInformationRates, \
+                         calculateDistributionRatios, visualizeDistributionRatios, visualizeInformationRates, visualizeEnergies, visualizeInformationRatesOptimality
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +158,6 @@ if __name__ == "__main__":
 
     # Values of weights to evaluate
     weights = np.array([0.9, 1.0, 2.0])
-    #weights = [1.0]
     def f(w):
         return learnMultilevelDictionary(multilevelDictRef, trainSignal, testSignal, w, resultsDir=outputResultPath, overwrite=args.overwrite_results)
     
@@ -168,7 +170,8 @@ if __name__ == "__main__":
     results = loadResults(outputResultPath)
     
     # Get optimal information rate across levels
-    optimalInfoRates = calculateMultilevelInformationRates(multilevelDictRef, testRates, dtype=testSignal.dtype)
+    coefficientsRef = convertEventsToSparseMatrices(testEvents, multilevelDictRef.counts, len(testSignal))
+    optimalInfoRates = calculateEmpiricalMultilevelInformationRates(coefficientsRef, multilevelDictRef)
     optimalScales = multilevelDictRef.scales
     
     # Visualize information rate distribution across levels
@@ -182,7 +185,7 @@ if __name__ == "__main__":
         # Get empirical information rate across levels
         sparseInfoRates = []
         for coefficients in coefficientsForScales:
-            rawInfoRate, sparseInfoRate = calculateEmpiricalInformationRates(testSignal, coefficients, multilevelDict)
+            sparseInfoRate = calculateEmpiricalInformationRates(coefficients, multilevelDict)
             sparseInfoRates.append(sparseInfoRate)
         sparseInfoRates = np.array(sparseInfoRates)
     
@@ -198,7 +201,7 @@ if __name__ == "__main__":
     ax2.set_xlim(ax.get_xlim())
     ax2.set_xticks(scales)
     ax2.set_xticklabels(labels, rotation='horizontal')
-    ax2.set_xlabel('Maximum level')
+    ax2.set_xlabel(r'Maximum level $l_{max}$')
         
     #ax.set_title('Information rate distribution')
     ax.set_xlabel('Maximum input-level scale')
@@ -234,16 +237,6 @@ if __name__ == "__main__":
     weights = np.array(weights)
     distributions = np.array(distributions)
     energies = np.array(energies)
-    
-
-    for i, (weight, multilevelDict, coefficientsForScales) in enumerate(results):
-        print weight
-        # Consider all levels
-        for level,coefficients in enumerate(coefficientsForScales):
-            # Coefficient distribution across levels
-            distribution = calculateDistributionRatios(coefficients)
-            print level+1
-            print distribution, np.sum([coefficients[l].nnz for l in range(level+1)])
     
     # Distribution analysis
     logger.info('Analysing distribution across levels...')

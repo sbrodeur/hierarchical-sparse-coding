@@ -43,22 +43,23 @@ def calculateBitForDatatype(dtype):
         raise Exception('Unsupported datatype: %s' % (str(dtype)))
     return c_bits
 
-def calculateBitForLevels(multilevelDict, dtype=np.float32):
+def calculateBitForLevels(multilevelDict, sequenceLength, dtype=np.float32):
     
     # Find the number of bit to describe a pattern at each scale (depends on the counts)
-    pidx_bits = np.ceil(np.log(multilevelDict.counts)/np.log(2))
-    sidx_bits = np.ceil(np.log(len(multilevelDict.scales))/np.log(2))
+    pidx_bits = np.ceil(np.log(multilevelDict.counts)/np.log(2)) # dictionary index
+    sidx_bits = np.ceil(np.log(len(multilevelDict.scales))/np.log(2)) # level index
+    tidx_bits = np.ceil(np.log(sequenceLength)/np.log(2)) # time index
     
-    c_bits = calculateBitForDatatype(dtype)
+    c_bits = calculateBitForDatatype(dtype) # coefficient amplitude
         
-    bits = sidx_bits + pidx_bits + c_bits
+    bits = sidx_bits + pidx_bits + tidx_bits + c_bits
     
     return bits
 
-def calculateInformationRate(multilevelDict, rates, dtype=np.float32):
+def calculateInformationRate(multilevelDict, rates, sequenceLength, dtype=np.float32):
     assert len(rates) == multilevelDict.getNbLevels()
     
-    bits = calculateBitForLevels(multilevelDict, dtype)
+    bits = calculateBitForLevels(multilevelDict, sequenceLength, dtype)
     
     avgInfoRate = 0.0
     for level in range(multilevelDict.getNbLevels()):
@@ -68,7 +69,7 @@ def calculateInformationRate(multilevelDict, rates, dtype=np.float32):
     
     return avgInfoRate
 
-def calculateMultilevelInformationRates(multilevelDict, rates, dtype=np.float32):
+def calculateMultilevelInformationRates(multilevelDict, rates, sequenceLength, dtype=np.float32):
     assert len(rates) == multilevelDict.getNbLevels()
     
     if not isinstance(rates[0], collections.Iterable):
@@ -79,7 +80,7 @@ def calculateMultilevelInformationRates(multilevelDict, rates, dtype=np.float32)
     for level in reversed(range(multilevelDict.getNbLevels())):
         
         # Calculate information rate
-        avgInfoRate = calculateInformationRate(multilevelDict, rates)
+        avgInfoRate = calculateInformationRate(multilevelDict, rates, sequenceLength)
         avgInfoRates.append(avgInfoRate)
         
         if level > 0:
@@ -99,14 +100,47 @@ def calculateMultilevelInformationRates(multilevelDict, rates, dtype=np.float32)
     avgInfoRates = np.array(avgInfoRates)[::-1]
     return avgInfoRates
     
-def calculateEmpiricalInformationRates(sequence, coefficients, multilevelDict):
-
-    # Raw data analysis
-    rawBits = calculateBitForDatatype(dtype=sequence.dtype) * len(sequence)
-    rawInfoRate = float(rawBits) / len(sequence)
+def calculateEmpiricalMultilevelInformationRates(coefficients, multilevelDict):
+    assert len(coefficients) == multilevelDict.getNbLevels()
+    
+    # Convert to a more efficient sparse format for indexing
+    coefficientsCounts = [c.conj().sign().tolil().astype(np.int) for c in coefficients]
+    
+    # Loop over for all levels, starting from the last
+    avgInfoRates = []
+    for level in reversed(range(multilevelDict.getNbLevels())):
+        
+        # Calculate information rate
+        sequenceLength = coefficients[0].shape[0]
+        bits = calculateBitForLevels(multilevelDict, sequenceLength, dtype=coefficients[0].dtype)
+        sparseBits = np.sum([coefficientsCounts[l].sum() * bits[l] for l in range(multilevelDict.getNbLevels())])
+        avgInfoRate = float(sparseBits) / sequenceLength
+        avgInfoRates.append(avgInfoRate)
+        
+        if level > 0:
+            # Redistribute activations at current level to the previous levels, based on the decomposition scheme.
+            # Loop over all elements at current level
+            c = coefficientsCounts[level].tocoo()
+            for tIdx, fIdx, counts in zip(c.row, c.col, c.data):
+                # Loop over all sub-elements at previous levels
+                selectedLevels, fIndices, tIndices, _ = multilevelDict.decompositions[level-1][fIdx]
+                for l, t, f in zip(selectedLevels, tIndices, fIndices):
+                    coefficientsCounts[l][t,f] += counts
+                    
+                # Remove the activation contribution of the element at current level
+                coefficientsCounts[level][tIdx, fIdx] -= counts
+            
+            assert coefficientsCounts[level].sum() == 0
+    
+    # Convert to numpy array and reverse
+    avgInfoRates = np.array(avgInfoRates)[::-1]
+    return avgInfoRates
+    
+def calculateEmpiricalInformationRates(coefficients, multilevelDict):
 
     # Sparse coefficient analysis
-    bits = calculateBitForLevels(multilevelDict, dtype=coefficients[0].dtype)
+    sequenceLength = coefficients[0].shape[0]
+    bits = calculateBitForLevels(multilevelDict, sequenceLength, dtype=coefficients[0].dtype)
     sparseBits = 0
     for level in range(len(coefficients)):
         if scipy.sparse.issparse(coefficients[level]):
@@ -114,9 +148,9 @@ def calculateEmpiricalInformationRates(sequence, coefficients, multilevelDict):
         else:
             nbEvents = coefficients[level].shape[0]
         sparseBits += nbEvents * bits[level]
-    sparseInfoRate = float(sparseBits) / len(sequence)
+    sparseInfoRate = float(sparseBits) / sequenceLength
     
-    return rawInfoRate, sparseInfoRate
+    return sparseInfoRate
     
 def calculateDistributionRatios(coefficients):
     # Coefficient distribution across levels

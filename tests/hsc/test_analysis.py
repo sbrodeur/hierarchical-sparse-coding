@@ -35,7 +35,8 @@ import scipy
 import scipy.sparse
 
 from hsc.dataset import MultilevelDictionary, MultilevelDictionaryGenerator
-from hsc.analysis import calculateBitForLevels, calculateInformationRate, calculateMultilevelInformationRates, calculateBitForDatatype, visualizeDistributionRatios, calculateDistributionRatios, visualizeInformationRates, visualizeEnergies, visualizeInformationRatesOptimality
+from hsc.analysis import calculateBitForLevels, calculateInformationRate, calculateMultilevelInformationRates, calculateEmpiricalMultilevelInformationRates, \
+                         calculateBitForDatatype, visualizeDistributionRatios, calculateDistributionRatios, visualizeInformationRates, visualizeEnergies, visualizeInformationRatesOptimality
 
 class TestFunctions(unittest.TestCase):
 
@@ -52,49 +53,62 @@ class TestFunctions(unittest.TestCase):
     def test_calculateBitForLevels(self):
         mldg = MultilevelDictionaryGenerator()
         multilevelDict = mldg.generate(scales=[32,64], counts=[8, 16])
-        bits = calculateBitForLevels(multilevelDict, dtype=np.float32)
+        bits = calculateBitForLevels(multilevelDict, 16, dtype=np.float32)
         self.assertTrue(len(bits) == multilevelDict.getNbLevels())
-        # First level: 1bit scale + 3 bit index + 32bit value = 36 bits
-        # Second level: 1bit scale + 4 bit index + 32bit value = 37 bits
-        self.assertTrue(np.allclose(bits, [36, 37]))
+        # First level: 1bit scale + 3 bit index + 4 bit time + 32bit value = 40 bits
+        # Second level: 1bit scale + 4 bit index + 4 bit time + 32bit value = 41 bits
+        self.assertTrue(np.allclose(bits, [40, 41]))
         
-        bits = calculateBitForLevels(multilevelDict, dtype=np.int16)
+        bits = calculateBitForLevels(multilevelDict, 8, dtype=np.int16)
         self.assertTrue(len(bits) == multilevelDict.getNbLevels())
-        # First level: 1bit scale + 3 bit index + 16bit value = 20 bits
-        # Second level: 1bit scale + 4 bit index + 16bit value = 21 bits
-        self.assertTrue(np.allclose(bits, [20, 21]))
+        # First level: 1bit scale + 3 bit index + 3 bit time + 16bit value = 23 bits
+        # Second level: 1bit scale + 4 bit index + 3 bit time + 16bit value = 24 bits
+        self.assertTrue(np.allclose(bits, [23, 24]))
         
     def test_calculateInformationRate(self):
         rates = [0.01]
         mldg = MultilevelDictionaryGenerator()
         multilevelDict = mldg.generate(scales=[32], counts=[8])
-        avgInfoRate = calculateInformationRate(multilevelDict, rates)
+        avgInfoRate = calculateInformationRate(multilevelDict, rates, 16)
         self.assertTrue(np.isscalar(avgInfoRate))
-        # First level: 0bit scale + 3 bit index + 32bit value = 35 bits
-        self.assertTrue(np.allclose(avgInfoRate, 35 * 0.01))
+        # First level: 0bit scale + 3 bit index + 4 bit time + 32bit value = 39 bits
+        self.assertTrue(np.allclose(avgInfoRate, 39 * 0.01))
         
         rates = [0.01, 0.02]
         multilevelDict = mldg.generate(scales=[32,64], counts=[8, 16])
-        avgInfoRate = calculateInformationRate(multilevelDict, rates)
+        avgInfoRate = calculateInformationRate(multilevelDict, rates, 16)
         self.assertTrue(np.isscalar(avgInfoRate))
-        # First level: 1bit scale + 3 bit index + 32bit value = 36 bits
-        # Second level: 1bit scale + 4 bit index + 32bit value = 37 bits
-        self.assertTrue(np.allclose(avgInfoRate, 36 * 0.01 + 37 * 0.02))
+        # First level: 1bit scale + 3 bit index + 4 bit time + 32bit value = 40 bits
+        # Second level: 1bit scale + 4 bit index + 4 bit time + 32bit value = 41 bits
+        self.assertTrue(np.allclose(avgInfoRate, 40 * 0.01 + 41 * 0.02))
         
     def test_calculateMultilevelInformationRates(self):
         
         rates = [0.01, 0.02]
         mldg = MultilevelDictionaryGenerator()
         multilevelDict = mldg.generate(scales=[32,64], counts=[8, 16], decompositionSize=3)
-        avgInfoRates = calculateMultilevelInformationRates(multilevelDict, rates, dtype=np.float32)
-        # First level: 1bit scale + 3 bit index + 32bit value = 36 bits
-        # Second level: 1bit scale + 4 bit index + 32bit value = 37 bits
-        self.assertTrue(np.allclose(avgInfoRates, [36 * 0.01 * 8 + 36 * 0.02 * 3 * 16, 
-                                                   36 * 0.01 * 8 + 37 * 0.02 * 16]))
+        avgInfoRates = calculateMultilevelInformationRates(multilevelDict, rates, 16, dtype=np.float32)
+        # First level: 1bit scale + 3 bit index + 4 bit time + 32bit value = 40 bits
+        # Second level: 1bit scale + 4 bit index + 4 bit time + 32bit value = 41 bits
+        self.assertTrue(np.allclose(avgInfoRates, [40 * 0.01 * 8 + 40 * 0.02 * 3 * 16, 
+                                                   40 * 0.01 * 8 + 41 * 0.02 * 16]))
         
         rates = [0.0001, 0.0002, 0.0004, 0.0004]
         multilevelDict = mldg.generate(scales=[32,64,128,256], counts=[8, 16, 32, 64], decompositionSize=4)
-        avgInfoRates = calculateMultilevelInformationRates(multilevelDict, rates, dtype=np.float32)
+        avgInfoRates = calculateMultilevelInformationRates(multilevelDict, rates, 16, dtype=np.float32)
+        self.assertTrue(np.array_equal(np.argsort(avgInfoRates), np.arange(len(avgInfoRates))[::-1]))
+        
+    def test_calculateEmpiricalMultilevelInformationRates(self):
+        
+        sequenceLength = 2**16
+        mldg = MultilevelDictionaryGenerator()
+        multilevelDict = mldg.generate(scales=[32,64], counts=[8, 16], decompositionSize=3)
+        coefficients = [scipy.sparse.random(sequenceLength, count, density=0.01).astype(np.float32) for count in multilevelDict.counts]
+        avgInfoRates = calculateEmpiricalMultilevelInformationRates(coefficients, multilevelDict)
+        # First level: 1bit scale + 3 bit index + 16 bit time + 32bit value = 52 bits
+        # Second level: 1bit scale + 4 bit index + 16 bit time + 32bit value = 53 bits
+        self.assertTrue(np.allclose(avgInfoRates, [(coefficients[0].nnz * 52.0 + 3 * coefficients[1].nnz * 52.0)/sequenceLength, 
+                                                   (coefficients[0].nnz * 52.0 + coefficients[1].nnz * 53.0)/sequenceLength]))
         self.assertTrue(np.array_equal(np.argsort(avgInfoRates), np.arange(len(avgInfoRates))[::-1]))
         
     def test_calculateDistributionRatios(self):

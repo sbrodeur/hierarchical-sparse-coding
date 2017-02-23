@@ -42,7 +42,7 @@ from numpy.lib.stride_tricks import as_strided
 import matplotlib
 import matplotlib.pyplot as plt
 
-from hsc.utils import overlapAdd, overlapReplace, normalize, peek
+from hsc.utils import overlapAdd, overlapReplace, normalize, peek, findGridSize
 from hsc.dataset import MultilevelDictionary
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ def extractWindows(sequence, indices, width, centered=False):
     
 def extractWindowsBatch(sequences, indices, width, centered=False):
     assert sequences.ndim == 2 or sequences.ndim == 3
-    assert width > 0 and width < sequences.shape[1]
+    assert width > 0 and width <= sequences.shape[1]
     
     if sequences.ndim == 2:
         sequences = sequences[:,:,np.newaxis]
@@ -141,6 +141,7 @@ def convolve1d(sequence, filters, padding='valid'):
 
     # TODO: when to use scipy.signal.fftconvolve?
     # convolve fiters by the signal
+    # TODO: broadcast sequence over filter axis to avoid the loop
 #     c = [scipy.signal.fftconvolve(sequence, filter[::-1, ::-1], mode='valid') for filter in filters]
 #     c = np.squeeze(np.stack(c, axis=-1), axis=1)
     
@@ -230,11 +231,18 @@ def reconstructSignal(coefficients, D):
 
 class ConvolutionalDictionaryLearner(object):
  
-    def __init__(self, k, windowSize, algorithm='kmean', avoidSingletons=False):
+    def __init__(self, k, windowSize, algorithm='kmean', avoidSingletons=False, verbose=False):
         self.k = k
         self.windowSize = windowSize
         self.algorithm = algorithm
         self.avoidSingletons = avoidSingletons
+ 
+        if verbose:
+            plt.ion()
+            self.fig = plt.figure(figsize=(8,8), facecolor='white', frameon=True)
+        else:
+            self.fig = None
+        self.verbose = verbose
  
     def _train_samples(self, data):
         
@@ -383,7 +391,7 @@ class ConvolutionalDictionaryLearner(object):
         # In ICLR. Retrieved from http://arxiv.org/abs/1511.06241
 
         # Extract windows from the data that are twice the length of the centroids
-        windows = extractRandomWindows(data, nbRandomWindows, 2*self.windowSize)
+        windows = extractRandomWindows(data, nbRandomWindows, 2 * self.windowSize)
  
         # Initialize dictionary with random windows from the data
         D = self._init_D(data, initMethod)
@@ -392,17 +400,43 @@ class ConvolutionalDictionaryLearner(object):
         alpha = tolerance + 1.0
         while n < maxIterations and alpha > tolerance:
  
+            if self.verbose:
+                count = D.shape[0]
+                m,k = findGridSize(count)
+                idx = 0
+                self.fig.clf()
+                self.fig.canvas.set_window_title('Iteration no.%d' % (n))
+                for i in range(m):
+                    for j in range(k):
+                        ax = self.fig.add_subplot(m,k,idx+1)
+                        ax.plot(D[idx], linewidth=2, color='k')
+                        r = np.max(np.abs(D[idx]))
+                        ax.set_ylim(-r, r)
+                        ax.set_axis_off()
+                        idx += 1
+                        if idx >= count:
+                            break
+                
+                self.fig.canvas.draw()
+ 
             # Convolve the centroids with the windows
             innerProducts = convolve1d_batch(windows, D, padding='valid')
             # innerProducts has shape [batch, length, filters]
  
             # Find the maximum similarity amongst centroids inside each window
-            indices = np.argmax(np.abs(innerProducts.reshape(innerProducts.shape[0], innerProducts.shape[1]*innerProducts.shape[2])), axis=1)
+            indices = np.argmax(np.abs(innerProducts.reshape(innerProducts.shape[0], -1)), axis=1)
             indices = np.unravel_index(indices, (innerProducts.shape[1], innerProducts.shape[2]))
- 
+            
             # Extract the patch where there is maximum similarity, and assign it to the centroid.
             maxSampleIndices = indices[0]
-            patches = extractWindowsBatch(windows, maxSampleIndices, width=D.shape[1], centered=True)
+            filterWidth = D.shape[1]
+            if np.mod(filterWidth, 2) == 0:
+                # Even
+                offset = filterWidth/2 - 1
+            else:
+                # Odd
+                offset = filterWidth/2
+            patches = extractWindowsBatch(windows, offset + maxSampleIndices, width=D.shape[1], centered=True)
             assignments = indices[1]
             assert np.max(assignments) < D.shape[0]
  
@@ -413,8 +447,9 @@ class ConvolutionalDictionaryLearner(object):
                 # This is to avoid NaNs.
                 assigned = np.where(assignments == c)
                 if np.any(assigned):
-                    # Assign to the mean of the patches
-                    centroid = np.mean(patches[assigned], axis=0)
+                    # Assign to the mean of the normalized patches (i.e. cosine mean)
+                    centroid = np.mean(normalize(patches[assigned]), axis=0)
+                    isReset = False
                 else:
                     # Assign to the average of some random patches
                     if resetMethod == 'random_samples':
@@ -427,18 +462,23 @@ class ConvolutionalDictionaryLearner(object):
                         centroid = np.random.uniform(low=-1.0, high=1.0, size=patches.shape[1:])
                     else:
                         raise Exception('Unsupported reset method: %s' % (resetMethod))
- 
+                    isReset = True
+                    
                 # Make sure that the centroid has not zero norm
                 EPS = 1e-9
                 l2norm = np.sqrt(np.sum(np.square(centroid)))
                 if l2norm == 0.0:
                     centroid += EPS
  
-                return centroid
+                return centroid, isReset
  
+            nbResets = 0
             centroids = []
             for c in range(D.shape[0]):
-                centroids.append(computeCentroid(c))
+                centroid, isReset = computeCentroid(c)
+                if isReset:
+                    nbResets += 1
+                centroids.append(centroid)
             centroids = np.stack(centroids)
  
             # Normalize the centroids to have unit norms
@@ -447,7 +487,7 @@ class ConvolutionalDictionaryLearner(object):
             # Compute distance change
             alpha = np.sqrt(np.sum(np.square(D - newD)))
             
-            logger.debug('K-mean iteration %d: tolerance = %f' % (n, alpha))
+            logger.debug('K-mean iteration %d: tolerance = %f, nb resets = %d' % (n, alpha, nbResets))
             D = newD
             n += 1
  
@@ -689,7 +729,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         
         logger.info('Matching pursuit: raw event is (t = %d, f = %d, c = %f)' % (atom.position, atom.index, atom.coefficient))
                     
-        plt.clf()
+        self.fig.clf()
         ax1 = self.fig.add_subplot(211)
         ax1.plot(residual, '-k', linewidth=2)
         
