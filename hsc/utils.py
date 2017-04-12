@@ -30,6 +30,8 @@
 import os
 import numpy as np
 import logging
+import matplotlib
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 
@@ -157,3 +159,31 @@ def overlapReplace(signal, element, t, copy=False):
             signal[max(0,t-width/2):min(signal.shape[0],t+width/2+1)] = element[startIdx:endIdx]
 
     return signal
+
+def visualize(D, maxCount=None, title=None):
+    
+    fig = plt.figure(figsize=(8,8), facecolor='white', frameon=True)
+    if title is not None:
+        fig.canvas.set_window_title(title)
+    fig.subplots_adjust(left=0.05, right=0.95, bottom=0.05, top=0.95,
+                        hspace=0.01, wspace=0.01)
+    
+    count = D.shape[0]
+    if maxCount is not None:
+        count = min(count, int(maxCount))
+        
+    m,n = findGridSize(count)
+    
+    dict = D[:count]
+    idx = 0
+    for i in range(m):
+        for j in range(n):
+            ax = fig.add_subplot(m,n,idx+1)
+            ax.plot(dict[idx], linewidth=2, color='k')
+            r = np.max(np.abs(dict[idx]))
+            ax.set_ylim(-r, r)
+            ax.set_axis_off()
+            idx += 1
+            if idx >= count:
+                break
+    return fig

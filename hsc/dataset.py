@@ -795,6 +795,21 @@ class SignalGenerator(object):
         
         return times
     
+def convertSparseMatricesToEvents(coefficients):
+    
+    events = []
+    for level, c in enumerate(coefficients):
+        c = c.tocoo()
+        events.extend([event for event in zip(c.row, level*np.ones_like(c.row), c.col, c.data)])
+    
+    # Sort events by time (increasing)
+    events = sorted(events, key=lambda x: x[0])
+            
+    # Convert to mixed-type numpy array
+    events = np.array(events, dtype=('int32,int32,int32,float32'))
+    
+    return events
+    
 def convertEventsToSparseMatrices(events, counts, sequenceLength):
     
     tIndices = np.array([event[0] for event in events], dtype=np.int)
@@ -805,7 +820,7 @@ def convertEventsToSparseMatrices(events, counts, sequenceLength):
     coefficients = []
     for level, count in enumerate(counts):
         mask = np.where(levels == level)
-        coefficients.append(scipy.sparse.coo_matrix((cValues[mask], (tIndices[mask], fIndices[mask])), shape=(sequenceLength, count)))
+        coefficients.append(scipy.sparse.coo_matrix((cValues[mask], (tIndices[mask], fIndices[mask])), shape=(sequenceLength, count)).tocsr())
     return coefficients
     
 def addSingletonBases(dictionaries):

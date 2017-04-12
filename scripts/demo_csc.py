@@ -36,8 +36,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 from hsc.dataset import MultilevelDictionary
-from hsc.modeling import ConvolutionalMatchingPursuit, ConvolutionalSparseCoder, ConvolutionalDictionaryLearner,\
-    LoCOMP
+from hsc.modeling import ConvolutionalMatchingPursuit, ConvolutionalSparseCoder, ConvolutionalDictionaryLearner, LoCOMP, HierarchicalConvolutionalMatchingPursuit, HierarchicalConvolutionalSparseCoder
 from hsc.analysis import calculateBitForDatatype
 from hsc.utils import findGridSize
 
@@ -103,40 +102,41 @@ if __name__ == "__main__":
     
     trainSignal = trainSignal[:10000]
     testSignal = testSignal[:10000]
+    method='optimal'
     
-    # Learning the dictionary
-#     logger.info('Learning dictionary (nmf)...')
-#     cdl = ConvolutionalDictionaryLearner(k=16, windowSize=32, algorithm='nmf')
-#     trainSignal = trainSignal[:10000]
-#     trainSignal -= np.min(trainSignal)
-#     testSignal -= np.min(testSignal)
-#     D = cdl.train(trainSignal, nbMaxIterations=100, initMethod='noise')
-
-#     logger.info('Learning dictionary (kmean)...')
-#     cdl = ConvolutionalDictionaryLearner(k=64, windowSize=32, algorithm='kmean', verbose=True)
-#     D = cdl.train(trainSignal, nbRandomWindows=1000, maxIterations=20, tolerance=0.0, resetMethod='random_samples')
-
-    logger.info('Learning dictionary (ksvd)...')
-    cdl = ConvolutionalDictionaryLearner(k=64, windowSize=32, algorithm='ksvd', verbose=True)
-    D = cdl.train(trainSignal, maxIterations=20, nbNonzeroCoefs=100, toleranceSnr=20.0)
-
-#     logger.info('Learning dictionary (samples)...')
-#     cdl = ConvolutionalDictionaryLearner(k=64, windowSize=32, algorithm='samples')
-#     D = cdl.train(trainSignal)
-
-#    logger.info('Using optimal dictionary...')
-#    D = multilevelDict.dicts[0]
+    if method == 'optimal':
+        logger.info('Using optimal dictionary...')
+        D = multilevelDict.dictionaries[0]
+    elif method == 'kmean':    
+        logger.info('Learning dictionary (kmean)...')
+        cdl = ConvolutionalDictionaryLearner(k=16, windowSize=32, algorithm='kmean', verbose=True)
+        D = cdl.train(trainSignal, nbRandomWindows=10000, maxIterations=10, tolerance=0.0, resetMethod='random_samples')
+    elif method == 'ksvd':
+        logger.info('Learning dictionary (ksvd)...')
+        cdl = ConvolutionalDictionaryLearner(k=16, windowSize=32, algorithm='ksvd', verbose=True)
+        D = cdl.train(trainSignal, maxIterations=20, nbNonzeroCoefs=100, toleranceSnr=20.0)
+    elif method == 'samples':
+        logger.info('Learning dictionary (samples)...')
+        cdl = ConvolutionalDictionaryLearner(k=16, windowSize=32, algorithm='samples')
+        D = cdl.train(trainSignal)
+    else:
+        raise Exception('Unsupported method: %s' % (method))
     
     # Visualize dictionary and save to disk as images
     fig = visualize(D, maxCounts=64)
-    fig.savefig(os.path.join(cdir, 'learned-dict-l0.eps'), format='eps', dpi=1200)
-
-    logger.info('Encoding signal...')
-    cmp = LoCOMP()
-    csc = ConvolutionalSparseCoder(D, approximator=cmp)
-    coefficients, residual = csc.encode(testSignal, nbNonzeroCoefs=None, toleranceSnr=20.0)
-    
     plt.show()
+    
+    logger.info('Encoding signal...')
+    #cmp = ConvolutionalMatchingPursuit(verbose=False)
+    cmp = LoCOMP(verbose=False)
+    csc = ConvolutionalSparseCoder(D, approximator=cmp)
+    coefficients, residual = csc.encode(testSignal, nbNonzeroCoefs=None, toleranceSnr=20.0, nbBlocks=1)
+    
+#     hcmp = HierarchicalConvolutionalMatchingPursuit(method='locomp')
+#     hcsc = HierarchicalConvolutionalSparseCoder(multilevelDict.upToLevel(0), approximator=hcmp)
+#     coefficients, residual = hcsc.encode(testSignal, toleranceSnr=40.0, nbBlocks=1, alpha=0.0, returnDistributed=True)
+#     assert len(coefficients) == 1
+#     coefficients = coefficients[0]
     
     # Performance for testing dataset
     pidx_bits = np.ceil(np.log(D.shape[0])/np.log(2))

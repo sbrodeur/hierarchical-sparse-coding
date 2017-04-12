@@ -50,7 +50,7 @@ if __name__ == "__main__":
     # NOTE: set so that any numerical error will raise an exception
     np.seterr(all='raise')
 
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
     cdir = os.path.dirname(os.path.realpath(__file__))
     outputResultPath = os.path.join(cdir, 'mlcsc')
     if not os.path.exists(outputResultPath):
@@ -91,9 +91,9 @@ if __name__ == "__main__":
     widths = scalesToWindowSizes(scales)
     for level, k, windowSize in zip(range(nbLevels), counts, widths):
         
-        logger.info('Learning dictionary (samples)...')
-        cdl = ConvolutionalDictionaryLearner(k, windowSize, algorithm='samples', avoidSingletons=True)
-        D = cdl.train(input)
+        logger.info('Learning dictionary (kmean)...')
+        cdl = ConvolutionalDictionaryLearner(k, windowSize, algorithm='kmean', verbose=True)
+        D = cdl.train(input, nbRandomWindows=10000, maxIterations=10, tolerance=0.0, resetMethod='random_samples')
         assert D.shape[0] == k
         dictionaries.append(D)
     
@@ -112,9 +112,9 @@ if __name__ == "__main__":
         if level == 0:
             coefficients, residual = hcsc.encode(trainSignal, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=0.95, returnDistributed=False)
         elif level < nbLevels - 1:
-            coefficients = hcsc.encodeFromLevel(coefficients, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=0.95, returnDistributed=False)
+            coefficients = hcsc.encodeFromLevel(trainSignal, coefficients, toleranceSnr=snr, nbBlocks=10, alpha=0.0, singletonWeight=0.95, returnDistributed=False)
         input = coefficients[-1].todense()
- 
+
     # Visualize dictionary and save to disk as images
     logger.info('Generating dictionary visualizations...')
     figs = multilevelDict.visualize(maxCounts=16)

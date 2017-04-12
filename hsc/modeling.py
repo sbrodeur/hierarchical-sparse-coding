@@ -47,6 +47,40 @@ from hsc.dataset import MultilevelDictionary
 
 logger = logging.getLogger(__name__)
 
+def pca(data, k=None):
+    assert data.ndim == 2
+    
+    m, n = data.shape
+    if m > 1:
+        # mean center the data
+        data -= data.mean(axis=0)
+        
+        # calculate the covariance matrix
+        R = np.cov(data, rowvar=False)
+        
+        # calculate eigenvectors & eigenvalues of the covariance matrix
+        # use 'eigh' rather than 'eig' since R is symmetric, 
+        # the performance gain is substantial
+        evals, evecs = scipy.linalg.eigh(R)
+        
+        # sort eigenvalue in decreasing order
+        idx = np.argsort(evals)[::-1]
+        evecs = evecs[:,idx]
+        
+        # sort eigenvectors according to same index
+        evals = evals[idx]
+        
+        # select the first n eigenvectors (n is desired dimension
+        # of rescaled data array, or dims_rescaled_data)
+        if k is not None:
+            evals = evals[:min(k, n)]
+            evecs = evecs[:, :min(k, n)]
+    else:
+        evals = None
+        evecs = normalize(data).T
+        
+    return evals, evecs
+
 def extractRandomWindows(sequence, nbWindows, width):
     assert sequence.ndim == 1 or sequence.ndim == 2
     assert nbWindows > 0
@@ -209,7 +243,8 @@ def reconstructSignal(coefficients, D):
         # Iterate through all sparse activations and overlap to signal
         cx = coefficients.tocoo()
         for t,fIdx,c in itertools.izip(cx.row, cx.col, cx.data):
-            overlapAdd(signal, c*D[fIdx], t, copy=False)
+            if c != 0.0:
+                overlapAdd(signal, c*D[fIdx], t, copy=False)
     else:
         # Dense convolution (in Fourier domain)
         filterWidth = D.shape[1]
@@ -231,11 +266,10 @@ def reconstructSignal(coefficients, D):
 
 class ConvolutionalDictionaryLearner(object):
  
-    def __init__(self, k, windowSize, algorithm='kmean', avoidSingletons=False, verbose=False):
+    def __init__(self, k, windowSize, algorithm='kmean', verbose=False):
         self.k = k
         self.windowSize = windowSize
         self.algorithm = algorithm
-        self.avoidSingletons = avoidSingletons
  
         if verbose:
             plt.ion()
@@ -244,7 +278,7 @@ class ConvolutionalDictionaryLearner(object):
             self.fig = None
         self.verbose = verbose
  
-    def _train_samples(self, data):
+    def _train_samples(self, data, avoidSingletons=False):
         
         # Loop until all the required number of non-null patterns is found
         patterns = []
@@ -256,7 +290,7 @@ class ConvolutionalDictionaryLearner(object):
      
             # Check if windows contain patterns that have non-zero norms
             l2norms = np.sqrt(np.sum(np.square(windows), axis=tuple(range(1, windows.ndim))))
-            if self.avoidSingletons:
+            if avoidSingletons:
                 l0norms = np.sum(windows != 0.0, axis=tuple(range(1, windows.ndim)))
                 validWindows = windows[np.where((l2norms > 0.0) & (l0norms > 1))]
             else:
@@ -493,6 +527,121 @@ class ConvolutionalDictionaryLearner(object):
  
         return D
  
+    def _train_ksvd(self, data, method='locomp', maxIterations=100, tolerance=0.0, nbNonzeroCoefs=None, toleranceSnr=40.0, usePCA=False):
+        """
+        Reference: 
+        M. Aharon, M. Elad, and A. Bruckstein. K-SVD: An algorithm for designing overcomplete dictionaries for sparse representation.
+        IEEE Transactions on Signal Processing, 54(11):4311-4322, 2006.
+        
+        Adapted algorithm for the convolutional case:
+        
+        Repeat until convergence:    
+            # Coefficient update stage, using any matching pursuit algorithm
+            X = MP(S, D) 
+            
+            # Dictionary update stage
+            For each dictionay element k in D:
+                
+                # Compute the overall error signal without the contribution of Dk 
+                Ek = S - D * X
+            
+                # Extract patches in Ek centered around each non-zero coefficient in X related to Dk
+                Pk = Ek[Xk]
+                
+                # Apply SVD decomposition and update Dk and Xk
+                
+        """
+    
+        # Initialize dictionary with random noise
+        D = self._init_D(data, initMethod='noise')
+
+        n = 0
+        alpha = tolerance + 1.0
+        while n < maxIterations and alpha > tolerance:
+ 
+            if self.verbose:
+                count = D.shape[0]
+                m,k = findGridSize(count)
+                idx = 0
+                self.fig.clf()
+                self.fig.canvas.set_window_title('Iteration no.%d' % (n))
+                for i in range(m):
+                    for j in range(k):
+                        ax = self.fig.add_subplot(m,k,idx+1)
+                        ax.plot(D[idx], linewidth=2, color='k')
+                        r = np.max(np.abs(D[idx]))
+                        ax.set_ylim(-r, r)
+                        ax.set_axis_off()
+                        idx += 1
+                        if idx >= count:
+                            break
+                
+                self.fig.canvas.draw()
+ 
+            # Coefficient update stage
+            if method == 'mptk-mp':
+                cmp = MptkConvolutionalMatchingPursuit(method='mp')
+            elif method == 'mptk-cmp':
+                cmp = MptkConvolutionalMatchingPursuit(method='cmp')
+            elif method == 'locomp':
+                cmp = LoCOMP()
+            elif method == 'cmp':
+                cmp = ConvolutionalMatchingPursuit()
+            else:
+                raise Exception('Unsupported sparse coding method: %s' % (method))
+            csc = ConvolutionalSparseCoder(D, cmp)
+            coefficients, residual = csc.encode(data, nbNonzeroCoefs=nbNonzeroCoefs, toleranceSnr=toleranceSnr)
+            
+            # Dictionary update stage
+            oldD = np.copy(D)
+            for k in range(D.shape[0]):
+
+                # Compute the overall error signal without the contribution of dictionary basis k
+                indices = coefficients[:,k].nonzero()[0]
+                if len(indices) == 0:
+                    continue
+                
+                coefficients[indices, k * np.ones_like(indices)] = 0.0
+                # NOTE: do not eliminate zeros since this would require later insertion in the CSR matrix
+                #coefficients.eliminate_zeros()
+                
+                # TODO: should we remove the residual from the signal?
+                error = reconstructSignal(coefficients, D)
+                
+                # Extract patches in error signal centered around each non-zero coefficient in X related to Dk
+                windows = extractWindows(np.pad(error, [(D.shape[1]/2, D.shape[1]/2),] + [(0,0) for _ in range(error.ndim-1)], mode='constant'), 
+                                         D.shape[1]/2 + indices, width=D.shape[1], centered=True)
+                
+                windows = windows.reshape((windows.shape[0], -1))
+
+                if usePCA:
+                    # Apply PCA
+                    evals, evecs = pca(windows, k=1)
+                    evec = evecs[:,0]
+                    
+                    # Update dictionary basis k to be the first eigenvector
+                    D[k,:] = evec
+                    
+                    # Update coefficients of basis k based on the projection on the first eigenvector
+                    coefficients[indices, k * np.ones_like(indices)] = np.dot(windows, evec[:,np.newaxis])[:,0]
+                else:
+                    # Apply SVD decomposition
+                    U, s, Vh = scipy.linalg.svd(windows.T, full_matrices=False)
+                    
+                    # Update dictionary basis k to be the first column of U
+                    D[k,:] = U[:,0].reshape(D.shape[1:])
+                    
+                    # Update coefficients of basis k to be the first column of V multiplied by the first singular value
+                    coefficients[indices, k * np.ones_like(indices)] = Vh.T[:,0] * s[0]
+ 
+            # Compute distance change
+            alpha = np.sqrt(np.sum(np.square(D - oldD)))
+            
+            logger.debug('K-SVD iteration %d: tolerance = %f, sparsity = %f' % (n, alpha, float(coefficients.nnz)/np.prod(coefficients.shape)))
+            n += 1
+                
+        return D
+                
     def train(self, X, *args, **kwargs):
         if self.algorithm == 'samples':
             D = self._train_samples(X, *args, **kwargs)
@@ -500,6 +649,8 @@ class ConvolutionalDictionaryLearner(object):
             D = self._train_kmean(X, *args, **kwargs)
         elif self.algorithm == 'nmf':
             D = self._train_nmf(X, *args, **kwargs)
+        elif self.algorithm == 'ksvd':
+            D = self._train_ksvd(X, *args, **kwargs)
         else:
             raise Exception('Unknown training algorithm: %s' % (self.algorithm))
 
@@ -783,7 +934,9 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             windows = np.stack(np.split(scores, nbBlocks, axis=0))
             
             # Get maximum activation inside each block
-            tRel, fIdx = np.unravel_index(np.argmax(np.abs(windows.reshape((windows.shape[0], windows.shape[1]*windows.shape[2]))), axis=1),
+#             tRel, fIdx = np.unravel_index(np.argmax(np.abs(windows.reshape((windows.shape[0], windows.shape[1]*windows.shape[2]))), axis=1),
+#                                        dims=(windows.shape[1], windows.shape[2]))
+            tRel, fIdx = np.unravel_index(np.argmax(np.abs(np.clip(windows.reshape((windows.shape[0], windows.shape[1]*windows.shape[2])), 0, np.inf)), axis=1),
                                        dims=(windows.shape[1], windows.shape[2]))
             t = tRel + np.arange(0, nbBlocks*blockSize, step=blockSize, dtype=np.int) - padding[0]
             
@@ -815,7 +968,8 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             
         else:
             # Find maximum across the whole activations
-            t, fIdx = np.unravel_index(np.argmax(np.abs(scores)), scores.shape)
+            t, fIdx = np.unravel_index(np.argmax(np.abs(np.clip(scores, 0, np.inf))), scores.shape)
+#             t, fIdx = np.unravel_index(np.argmax(np.abs(scores)), scores.shape)
             t = np.stack((t,))
             fIdx = np.stack((fIdx,))
             coefficients = innerProducts[t, fIdx]
@@ -1178,7 +1332,7 @@ class LoCOMP(ConvolutionalMatchingPursuit):
                     Gsup = np.linalg.pinv(DsupF).T
                     coefficientsSup = np.dot(Gsup, residualSup.flatten()).flatten()
                     
-                    innerProductsSup = convolve1d(residualSup, D, padding='same')
+#                    innerProductsSup = convolve1d(residualSup, D, padding='same')
 #                     print innerProductsSup.shape, Dsup.shape
 #                     for i, commonSupportAtom in enumerate(commonSupportAtoms):
 #                         print innerProducts[commonSupportAtom.position, commonSupportAtom.index], np.dot(DsupF[i], residualSup.flatten())

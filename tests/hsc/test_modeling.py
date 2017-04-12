@@ -118,6 +118,19 @@ class TestConvolutionalDictionaryLearner(unittest.TestCase):
             D = cdl.train(sequence, nbRandomWindows=32, maxIterations=100, tolerance=0.0, resetMethod=resetMethod)
             self.assertTrue(np.array_equal(D.shape, [16,5,nbFeatures]))
 
+    def test_train_ksvd_1d(self):
+        sequence = np.random.random(size=(256,))
+        cdl = ConvolutionalDictionaryLearner(k=16, windowSize=5, algorithm='ksvd')
+        D = cdl.train(sequence, method='locomp', maxIterations=4, tolerance=0.0)
+        self.assertTrue(np.array_equal(D.shape, [16,5]))
+
+    def test_train_ksvd_2d(self):
+        nbFeatures = 4
+        sequence = np.random.random(size=(256,nbFeatures))
+        cdl = ConvolutionalDictionaryLearner(k=16, windowSize=5, algorithm='ksvd')
+        D = cdl.train(sequence, method='locomp', maxIterations=4, tolerance=0.0)
+        self.assertTrue(np.array_equal(D.shape, [16,5,nbFeatures]))
+
 class TestMptkConvolutionalMatchingPursuit(unittest.TestCase):
     
     def test_computeCoefficients_1d(self):
@@ -856,6 +869,15 @@ class TestHierarchicalConvolutionalSparseCoder(unittest.TestCase):
             self.assertTrue(np.array_equal(signal.shape, reconstruction.shape))
         
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.WARN)
+    #logging.basicConfig(level=logging.WARN)
+    #np.seterr(all='raise')
+    #unittest.main()
+    
+    np.random.seed(42)
+    logging.basicConfig(level=logging.DEBUG)
     np.seterr(all='raise')
-    unittest.main()
+    suite = unittest.TestSuite()
+    suite.addTest(TestConvolutionalDictionaryLearner('test_train_ksvd_1d'))
+    suite.addTest(TestConvolutionalDictionaryLearner('test_train_ksvd_2d'))
+    unittest.TextTestRunner().run(suite)
+    

@@ -33,10 +33,12 @@ import logging
 import unittest
 import tempfile
 import numpy as np
+import scipy
+import scipy.sparse
 import matplotlib
 import matplotlib.pyplot as plt
 
-from hsc.dataset import Perlin, MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator, scalesToWindowSizes, convertEventsToSparseMatrices
+from hsc.dataset import Perlin, MultilevelDictionary, MultilevelDictionaryGenerator, SignalGenerator, scalesToWindowSizes, convertEventsToSparseMatrices, convertSparseMatricesToEvents
 
 class TestPerlin(unittest.TestCase):
 
@@ -348,6 +350,17 @@ class TestFunctions(unittest.TestCase):
         coefficients = [c.tocsr() for c in coefficients]
         for tIdx,level,fIdx,c in events:
             self.assertTrue(coefficients[level][tIdx,fIdx] == c)
+
+    def test_convertSparseMatricesToEvents(self):
+        
+        nbSamples = int(1e4)
+        counts = [16, 32]
+        coefficientsRef = [scipy.sparse.rand(nbSamples, count, density=0.01, format='csr', dtype=np.float32) for count in counts]
+        
+        events = convertSparseMatricesToEvents(coefficientsRef)
+        coefficients = convertEventsToSparseMatrices(events, counts, nbSamples)
+        for level in range(len(coefficients)):
+            self.assertTrue((coefficients[level] != coefficientsRef[level]).nnz == 0)
 
     def test_scalesToWindowSizes(self):
         scales = [3,5,9]
