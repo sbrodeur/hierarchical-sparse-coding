@@ -3,7 +3,7 @@ Hierarchical sparse coding using greedy matching pursuit.
 
 ![alt tag](https://github.com/sbrodeur/hierarchical-sparse-coding/raw/master/docs/images/algorithm.png)
 
-S. Brodeur and J. Rouat, “Optimality of inference in distributed hierarchical coding for object-based representations,” in 2017 15th Canadian Workshop on Information Theory (CWIT) (CWIT 2017), 2017.
+S. Brodeur and J. Rouat, “Optimality of inference in distributed hierarchical coding for object-based representations,” in 15th Canadian Workshop on Information Theory (CWIT), 2017.
 
 ## Dependencies
 
@@ -47,7 +47,7 @@ Note that this can take some time.
 ## Citation
 
 Please cite Hierarchical sparse coding (HSC) algorithm in publications when used:
-> S. Brodeur and J. Rouat, “Optimality of inference in distributed hierarchical coding for object-based representations,” in 2017 15th Canadian Workshop on Information Theory (CWIT) (CWIT 2017), 2017.
+> S. Brodeur and J. Rouat, “Optimality of inference in distributed hierarchical coding for object-based representations,” in 15th Canadian Workshop on Information Theory (CWIT), 2017.
 
 BibTeX entry for LaTeX:
 ```
@@ -55,7 +55,7 @@ BibTeX entry for LaTeX:
 AUTHOR="Simon Brodeur and Jean Rouat",
 TITLE="Optimality of inference in distributed hierarchical coding for object-based
 representations",
-BOOKTITLE="2017 15th Canadian Workshop on Information Theory (CWIT) (CWIT 2017)",
+BOOKTITLE="15th Canadian Workshop on Information Theory (CWIT)",
 ADDRESS="Quebec city, Canada",
 DAYS=11,
 MONTH=jun,
