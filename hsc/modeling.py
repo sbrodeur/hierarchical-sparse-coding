@@ -934,10 +934,8 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             windows = np.stack(np.split(scores, nbBlocks, axis=0))
             
             # Get maximum activation inside each block
-#             tRel, fIdx = np.unravel_index(np.argmax(np.abs(windows.reshape((windows.shape[0], windows.shape[1]*windows.shape[2]))), axis=1),
-#                                        dims=(windows.shape[1], windows.shape[2]))
-            tRel, fIdx = np.unravel_index(np.argmax(np.abs(np.clip(windows.reshape((windows.shape[0], windows.shape[1]*windows.shape[2])), 0, np.inf)), axis=1),
-                                       dims=(windows.shape[1], windows.shape[2]))
+            tRel, fIdx = np.unravel_index(np.argmax(np.abs(windows.reshape((windows.shape[0], windows.shape[1]*windows.shape[2]))), axis=1),
+                                          dims=(windows.shape[1], windows.shape[2]))
             t = tRel + np.arange(0, nbBlocks*blockSize, step=blockSize, dtype=np.int) - padding[0]
             
             # Remove activations outside the valid range (e.g. because of padding)
@@ -968,8 +966,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             
         else:
             # Find maximum across the whole activations
-            t, fIdx = np.unravel_index(np.argmax(np.abs(np.clip(scores, 0, np.inf))), scores.shape)
-#             t, fIdx = np.unravel_index(np.argmax(np.abs(scores)), scores.shape)
+            t, fIdx = np.unravel_index(np.argmax(np.abs(scores)), scores.shape)
             t = np.stack((t,))
             fIdx = np.stack((fIdx,))
             coefficients = innerProducts[t, fIdx]
