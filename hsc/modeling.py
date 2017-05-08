@@ -907,9 +907,9 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
             assert len(weights) == innerProducts.shape[1]
             scores = innerProducts * weights[np.newaxis,:]
         
-        if nbBlocks is None or nbBlocks > 1:
+        if nbBlocks == 'auto' or nbBlocks > 1:
             # Calculate the number of blocks
-            if nbBlocks is None:
+            if nbBlocks == 'auto':
                 # If the number of blocks was not provided, set it automatically so that block sizes are of 4 times the length of the filters
                 blockSize = 4 * filterWidth
             else:
