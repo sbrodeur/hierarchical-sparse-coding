@@ -33,13 +33,11 @@ import tempfile
 import itertools
 import copy
 import collections
-import scipy
 import scipy.signal
 import scipy.sparse
 import numpy as np
 from numpy.lib.stride_tricks import as_strided
 
-import matplotlib
 import matplotlib.pyplot as plt
 
 from hsc.utils import overlapAdd, overlapReplace, normalize, peek, findGridSize
@@ -900,7 +898,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
 
     def _selectBestAtoms(self, innerProducts, filterWidth, nbBlocks=1, offset=False, nullCoeffThres=0.0, weights=None):
         
-         # Calculate the score for selection
+        # Calculate the score for selection
         if weights is None:
             scores = innerProducts
         else:
@@ -997,8 +995,6 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
     
     def _updateResidual(self, residual, energyResidual, atoms, D, eps=1e-16):
 
-        residualCopy = np.copy(residual)
-
         energyLoss = 0.0
         for atom in atoms:
             # Update the residual by removing the contribution of the selected filter
@@ -1011,12 +1007,6 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         if energyLoss < 0.0 and np.abs(energyLoss) > eps:
             logger.warn('Residual energy (%f) increased by %4.18f' % (energyResidual, -energyLoss))
             
-#             plt.ioff()
-#             for atom in atoms:
-#                 self.fig = plt.figure(figsize=(12,8), facecolor='white', frameon=True)
-#                 self._updateDemo(atom, D, residualCopy)
-#                 plt.show()
-                
             if self.verbose:
                 plt.ioff()
                 plt.show()
@@ -1060,7 +1050,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         
         return innerProducts
         
-    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.0, minCoefficients=1e-16, weights=None, stopCondition=None):
+    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, minCoefficients=1e-16, weights=None, stopCondition=None):
         assert sequence.ndim == 1 or sequence.ndim == 2
         assert D.ndim == 2 or D.ndim == 3
 
@@ -1095,11 +1085,19 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
         nbSelections = 0
         while not converged:
 
-            # Adaptive selection: rejection if coefficients are less that alpha times the maximum.
-            nullCoeffThres = alpha * np.max(np.abs(innerProducts))
-            if minCoefficients is not None:
-                nullCoeffThres = max(minCoefficients, nullCoeffThres)
-            atoms = self._selectBestAtoms(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=nullCoeffThres, weights=weights)
+            atoms = self._selectBestAtoms(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=minCoefficients, weights=weights)
+            
+            if toleranceSnr is not None and len(atoms) > 1:
+                # Compute the mean residual energy threshold to achieve the given SNR tolerance
+                energyResidualToleranceSnr = energySignal / (10.0**(toleranceSnr/10.0))
+                meanEnergyResidualForToleranceSnr = energyResidualToleranceSnr / np.prod(sequence.shape)
+
+                meanEnergyWindows = [np.mean(np.square(peek(residual, atom.length, atom.position))) for atom in atoms]
+                selectedAtoms = [atom for atom, maxScale in zip(atoms,meanEnergyWindows) if maxScale >= meanEnergyResidualForToleranceSnr]
+                nbWeaks = len(atoms) - len(selectedAtoms)
+                logger.debug('Number of weak activations removed during selection: %d' % (nbWeaks))
+                atoms = selectedAtoms
+            
             for atom in atoms:
         
                 if self.verbose:
@@ -1155,7 +1153,7 @@ class ConvolutionalMatchingPursuit(SparseApproximator):
                 converged = True
                 
             if stopCondition is not None:
-                if stopCondition(coefficients):
+                if stopCondition(sequence, residual, coefficients):
                     logger.warn('Custom stop condition reached: considering convergence is achieved')
                     converged = True
                 
@@ -1262,7 +1260,7 @@ class LoCOMP(ConvolutionalMatchingPursuit):
         
         return Dsup, sequenceSup
     
-    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.0, minCoefficients=1e-16, weights=None, stopCondition=None, G=None):
+    def computeCoefficients(self, sequence, D, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, minCoefficients=1e-16, weights=None, stopCondition=None):
         assert sequence.ndim == 1 or sequence.ndim == 2
         assert D.ndim == 2 or D.ndim == 3
 
@@ -1277,9 +1275,6 @@ class LoCOMP(ConvolutionalMatchingPursuit):
         if D.ndim == 2:
             squeezeOutput = True
             D = D[:,:,np.newaxis]
-
-        if G is None:
-            G = self._precomputeGramMatrixForShifts(D)
 
         # Initialize the residual and sparse coefficients
         energySignal = np.sum(np.square(sequence))
@@ -1298,11 +1293,19 @@ class LoCOMP(ConvolutionalMatchingPursuit):
         nbSelections = 0
         while not converged:
 
-            # Adaptive selection: rejection if coefficients are less that alpha times the maximum.
-            nullCoeffThres = alpha * np.max(np.abs(innerProducts))
-            if minCoefficients is not None:
-                nullCoeffThres = max(minCoefficients, nullCoeffThres)
-            atoms = self._selectBestAtoms(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=nullCoeffThres, weights=weights)
+            atoms = self._selectBestAtoms(innerProducts, nbBlocks=nbBlocks, filterWidth=D.shape[1], offset=offset, nullCoeffThres=minCoefficients, weights=weights)
+            
+            if toleranceSnr is not None and len(atoms) > 1:
+                # Compute the mean residual energy threshold to achieve the given SNR tolerance
+                energyResidualToleranceSnr = energySignal / (10.0**(toleranceSnr/10.0))
+                meanEnergyResidualForToleranceSnr = energyResidualToleranceSnr / np.prod(sequence.shape)
+
+                meanEnergyWindows = [np.mean(np.square(peek(residual, atom.length, atom.position))) for atom in atoms]
+                selectedAtoms = [atom for atom, maxScale in zip(atoms,meanEnergyWindows) if maxScale >= meanEnergyResidualForToleranceSnr]
+                nbWeaks = len(atoms) - len(selectedAtoms)
+                logger.debug('Number of weak activations removed during selection: %d' % (nbWeaks))
+                atoms = selectedAtoms
+            
             for atom in atoms:
         
                 if self.verbose:
@@ -1329,16 +1332,7 @@ class LoCOMP(ConvolutionalMatchingPursuit):
                     Gsup = np.linalg.pinv(DsupF).T
                     coefficientsSup = np.dot(Gsup, residualSup.flatten()).flatten()
                     
-#                    innerProductsSup = convolve1d(residualSup, D, padding='same')
-#                     print innerProductsSup.shape, Dsup.shape
-#                     for i, commonSupportAtom in enumerate(commonSupportAtoms):
-#                         print innerProducts[commonSupportAtom.position, commonSupportAtom.index], np.dot(DsupF[i], residualSup.flatten())
-                    #print Dsup[0].flatten()
-                    #print D[commonSupportAtoms[0].index].flatten()
-                    #print coefficientsSup
-                
                     # Update the sparse coefficients
-                    coefficientsSupOrig = np.array([coefficients[commonSupportAtom.position, commonSupportAtom.index] for commonSupportAtom in commonSupportAtoms], dtype=coefficients.dtype)
                     for commonSupportAtom, coefficientSup in zip(commonSupportAtoms, coefficientsSup):
                         commonSupportAtom.coefficient = coefficientSup
                     coefficients = self._updateCoefficients(coefficients, commonSupportAtoms, replace=False)
@@ -1435,7 +1429,7 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
     def __init__(self, method='locomp'):
         self.method = method
 
-    def _forwardPhase(self, sequence, multilevelDict, toleranceSnr=None, nbBlocks=1, alpha=0.5, singletonWeight=0.5, stopCondition=None):
+    def _forwardPhase(self, sequence, multilevelDict, toleranceSnr=None, nbBlocks=1, singletonWeight=0.5, stopCondition=None):
         
         # Loop over all levels
         input = sequence
@@ -1484,11 +1478,11 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
             elif self.method == 'locomp':
                 cmp = LoCOMP()
                 levelCoder = ConvolutionalSparseCoder(D, cmp)
-                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, weights=weights)
             elif self.method == 'cmp':
                 cmp = ConvolutionalMatchingPursuit()
                 levelCoder = ConvolutionalSparseCoder(D, cmp)
-                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, weights=weights)
             else:
                 raise Exception('Unsupported sparse coding method: %s' % (self.method))
             
@@ -1497,7 +1491,7 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
         
         return coefficients
 
-    def _forwardPhaseFromLevel(self, sequence, coefficients, multilevelDict, toleranceSnr=None, nbBlocks=1, alpha=0.5, singletonWeight=0.5, stopCondition=None):
+    def _forwardPhaseFromLevel(self, sequence, coefficients, multilevelDict, toleranceSnr=None, nbBlocks=1, singletonWeight=0.5, stopCondition=None):
         
         # Loop over all remaining levels, starting from the last level in the provided coefficients
         fromLevel = len(coefficients)
@@ -1546,11 +1540,11 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
             elif self.method == 'locomp':
                 cmp = LoCOMP()
                 levelCoder = ConvolutionalSparseCoder(D, cmp)
-                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, weights=weights)
             elif self.method == 'cmp':
                 cmp = ConvolutionalMatchingPursuit()
                 levelCoder = ConvolutionalSparseCoder(D, cmp)
-                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, alpha=alpha, weights=weights)
+                levelCoefficients, residual = levelCoder.encode(input, toleranceSnr=targetSnr, nbBlocks=nbBlocks, weights=weights)
             else:
                 raise Exception('Unsupported sparse coding method: %s' % (self.method))
             
@@ -1622,7 +1616,7 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
         if returnDistributed:
             coefficients = self.convertToDistributedCoefficients(coefficients)
         else:
-             # Loop over all levels
+            # Loop over all levels
             newCoefficients = []
             for level in range(multilevelDict.getNbLevels()):
                 levelCoefficients = coefficients[level]
@@ -1639,23 +1633,23 @@ class HierarchicalConvolutionalMatchingPursuit(SparseApproximator):
         
         return coefficients
     
-    def computeCoefficients(self, sequence, multilevelDict, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, singletonWeight=0.5, returnDistributed=True, stopCondition=None):
+    def computeCoefficients(self, sequence, multilevelDict, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, minCoefficients=None, singletonWeight=0.5, returnDistributed=True, stopCondition=None):
         assert isinstance(multilevelDict, MultilevelDictionary)
         
         # Encode signal bottom-up through all layers
-        coefficients = self._forwardPhase(sequence, multilevelDict, toleranceSnr, nbBlocks, alpha, singletonWeight, stopCondition)
+        coefficients = self._forwardPhase(sequence, multilevelDict, toleranceSnr, nbBlocks, singletonWeight, stopCondition)
         coefficients = self._postprocessCoefficients(coefficients, multilevelDict, returnDistributed)
         residual = self._calculateResidual(sequence, coefficients, multilevelDict)
         return coefficients, residual
     
-    def computeCoefficientsFromLevel(self, sequence, coefficients, multilevelDict, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, alpha=0.5, minCoefficients=None, singletonWeight=0.5, stopCondition=None, returnDistributed=True):
+    def computeCoefficientsFromLevel(self, sequence, coefficients, multilevelDict, nbNonzeroCoefs=None, toleranceResidualScale=None, toleranceSnr=None, nbBlocks=1, minCoefficients=None, singletonWeight=0.5, stopCondition=None, returnDistributed=True):
         assert isinstance(multilevelDict, MultilevelDictionary)
 
         # FIXME: not sure why deep copy is needed here, maybe because this is a list instance
         coefficients = copy.deepcopy(coefficients)
 
         # Encode signal bottom-up through all layers
-        coefficients = self._forwardPhaseFromLevel(sequence, coefficients, multilevelDict, toleranceSnr, nbBlocks, alpha, singletonWeight, stopCondition)
+        coefficients = self._forwardPhaseFromLevel(sequence, coefficients, multilevelDict, toleranceSnr, nbBlocks, singletonWeight, stopCondition)
         coefficients = self._postprocessCoefficients(coefficients, multilevelDict, returnDistributed)
         return coefficients
     

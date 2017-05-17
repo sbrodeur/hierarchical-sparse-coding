@@ -207,11 +207,11 @@ class TestLoCOMP(unittest.TestCase):
                 self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
         
         # 1D sequence with blocking
-        for nbBlocks in [1,2,8]:
+        for nbBlocks in [1,2,8, 'auto']:
             cmp = LoCOMP()
             sequence = np.random.random(size=(256,))
             D = normalize(np.random.random(size=(16,15)), axis=1)
-            coefficients, residual = cmp.computeCoefficients(sequence, D, nbBlocks=nbBlocks)
+            coefficients, residual = cmp.computeCoefficients(sequence, D, toleranceSnr=5.0, nbBlocks=nbBlocks)
             self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
         
     def test_computeCoefficients_2d(self):
@@ -234,11 +234,11 @@ class TestLoCOMP(unittest.TestCase):
             self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
 
         # 2D sequence with blocking
-        for nbBlocks in [1,2,8]:
+        for nbBlocks in [1,2,8,'auto']:
             cmp = LoCOMP()
             sequence = np.random.random(size=(256,nbFeatures))
             D = normalize(np.random.random(size=(16,15,nbFeatures)), axis=(1,2))
-            coefficients, residual = cmp.computeCoefficients(sequence, D, nbBlocks=nbBlocks)
+            coefficients, residual = cmp.computeCoefficients(sequence, D, toleranceSnr=5.0, nbBlocks=nbBlocks)
             self.assertTrue(np.sum(np.square(residual)) < np.sum(np.square(sequence)))
    
 
@@ -296,7 +296,7 @@ class TestConvolutionalMatchingPursuit(unittest.TestCase):
         
         # Odd filter size, no offset, automatic number of blocks (no interference expected)
         filterWidth = 3
-        nbBlocks = None
+        nbBlocks = 'auto'
         cmp = ConvolutionalMatchingPursuit()
         innerProducts = np.arange(256).reshape((64,4)).astype(np.float)
         innerProducts[-1] = innerProducts[-1][::-1]
@@ -837,7 +837,7 @@ class TestHierarchicalConvolutionalMatchingPursuit(unittest.TestCase):
         for method in ['cmp', 'locomp']:
             
             hcmp = HierarchicalConvolutionalMatchingPursuit(method)
-            coefficients, residual = hcmp.computeCoefficients(signal, multilevelDict.withSingletonBases(), toleranceSnr=[20,10,10], nbBlocks=1, alpha=0.1, singletonWeight=0.9)
+            coefficients, residual = hcmp.computeCoefficients(signal, multilevelDict.withSingletonBases(), toleranceSnr=[20,10,10], nbBlocks=1, singletonWeight=0.9)
             self.assertTrue(len(coefficients) == 3)
             self.assertTrue(np.array_equal(residual.shape, signal.shape))
             self.assertTrue(np.max(np.abs(residual)) < np.max(np.abs(signal)))
@@ -860,7 +860,7 @@ class TestHierarchicalConvolutionalSparseCoder(unittest.TestCase):
         
             hcmp = HierarchicalConvolutionalMatchingPursuit(method)
             hsc = HierarchicalConvolutionalSparseCoder(multilevelDict, hcmp)
-            coefficients, residual = hsc.encode(signal, toleranceSnr=[20,10,10], nbBlocks=1, alpha=0.1, singletonWeight=0.9)
+            coefficients, residual = hsc.encode(signal, toleranceSnr=[20,10,10], nbBlocks=1, singletonWeight=0.9)
             self.assertTrue(len(coefficients) == 3)
             self.assertTrue(np.array_equal(residual.shape, signal.shape))
             self.assertTrue(np.max(np.abs(residual)) < np.max(np.abs(signal)))
@@ -869,15 +869,16 @@ class TestHierarchicalConvolutionalSparseCoder(unittest.TestCase):
             self.assertTrue(np.array_equal(signal.shape, reconstruction.shape))
         
 if __name__ == '__main__':
-    #logging.basicConfig(level=logging.WARN)
-    #np.seterr(all='raise')
-    #unittest.main()
-    
-    np.random.seed(42)
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.WARN)
     np.seterr(all='raise')
-    suite = unittest.TestSuite()
-    suite.addTest(TestConvolutionalDictionaryLearner('test_train_ksvd_1d'))
-    suite.addTest(TestConvolutionalDictionaryLearner('test_train_ksvd_2d'))
-    unittest.TextTestRunner().run(suite)
+    unittest.main()
+    
+#     np.random.seed(42)
+#     logging.basicConfig(level=logging.DEBUG)
+#     np.seterr(all='raise')
+#     suite = unittest.TestSuite()
+#     suite.addTest(TestLoCOMP('test_computeCoefficients_1d'))
+#     suite.addTest(TestLoCOMP('test_computeCoefficients_2d'))
+#     unittest.TextTestRunner().run(suite)
+    
     
